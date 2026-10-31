@@ -42,6 +42,10 @@ Configuration example is located at [/docs/config.yaml](https://github.com/MetaC
 
 Documentation can be found in [mihomo Docs](https://wiki.metacubex.one/).
 
+## Project extensions
+
+This fork's routing and weighted-sticky extension documentation is at [docs/extensions/README.md](docs/extensions/README.md).
+
 ## For development
 
 Requirements:

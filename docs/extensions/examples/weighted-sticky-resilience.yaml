@@ -1,0 +1,90 @@
+# Complete, test-only configuration for weighted-sticky with account admission
+# and a subscription site-blacklist.
+#
+# No real credential is present. The UUID below is a fixed test value and the
+# control address points at an isolated local mock; it is never a production
+# endpoint. Two local SOCKS5 servers stand in for nodes.
+#
+# Verify parsing/validation with:
+#   mihomo.exe -t -f docs/extensions/examples/weighted-sticky-resilience.yaml
+#
+# Selection order for a connection:
+#   1. a valid cached binding is tried first, even if its node is now blacklisted
+#   2. without a cache: exclude grace/disabled/unmapped nodes, then use only
+#      non-blacklisted positive-weight nodes when any exist
+#   3. if every admitted node is blacklisted, those nodes are still tried
+#   4. official health only orders the first weighted draw; if every health
+#      record says unhealthy, the strategy still performs a bounded real dial
+#
+# Attempts stay inside Mihomo's official tunnel retry loop (at most 10 attempts
+# and the TCP dial context). A cached node gets three sticky attempts including
+# the first; a fresh node gets one; then the stable candidate order rotates.
+
+mixed-port: 17890
+allow-lan: false
+bind-address: 127.0.0.1
+mode: rule
+log-level: info
+ipv6: false
+external-controller: ""
+
+proxies:
+  - name: 主节点
+    type: socks5
+    server: 127.0.0.1
+    port: 17891
+    udp: true
+  - name: 备节点
+    type: socks5
+    server: 127.0.0.1
+    port: 17892
+    udp: true
+
+site-blacklist:
+  - proxy: 主节点
+    domains: [login.example.test]
+    domain-suffixes: [media.example.test]
+
+proxy-groups:
+  - name: 单节点出口
+    type: select
+    proxies: [备节点]
+  - name: 网站负载
+    type: load-balance
+    proxies:
+      - 主节点
+      - 备节点
+    url: http://127.0.0.1:17894/health
+    expected-status: 200
+    interval: 300
+    strategy: weighted-sticky
+    weighted-sticky:
+      idle-timeout: 300
+      default-weight: 1
+      weights:
+        "主节点": 7
+        "备节点": 3
+      max-bindings: 10000
+      # Separate groups are recommended when sites need different blacklists.
+      site-groups:
+        - name: 登录服务
+          domains:
+            - login.example.test
+        - name: 媒体服务
+          domain-suffixes:
+            - media.example.test
+      resilience:
+        enabled: true
+        control:
+          base-url: http://mock-control:8080
+          uuid: 11111111-1111-4111-8111-111111111111
+          timeout: 3
+          min-interval: 30
+          grace-interval: 300
+          node-ids:
+            主节点: primary
+            备节点: backup
+
+rules:
+  - DOMAIN-SUFFIX,single.example.test,单节点出口
+  - MATCH,网站负载

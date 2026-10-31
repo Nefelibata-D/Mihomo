@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	weightedsticky "github.com/metacubex/mihomo/adapter/outboundgroup/weighted_sticky_util"
 	"github.com/metacubex/mihomo/common/callback"
 	"github.com/metacubex/mihomo/common/lru"
 	N "github.com/metacubex/mihomo/common/net"
@@ -22,12 +23,23 @@ import (
 type LoadBalanceOption struct {
 	Strategy string `group:"strategy,omitempty"`
 	HashKey  string `group:"hash-key,omitempty"`
+
+	// WeightedSticky is the raw `weighted-sticky` block. It is validated by
+	// weightedsticky.ParseOptions; a presence flag keeps an empty block from
+	// being silently ignored on another strategy.
+	WeightedSticky        map[string]any `group:"weighted-sticky,omitempty"`
+	weightedStickyPresent bool           `group:"-"`
+	// SiteBlacklist is parsed once from the subscription top level and shared
+	// by every group that explicitly selects weighted-sticky.
+	SiteBlacklist *weightedsticky.SiteBlacklistIndex `group:"-"`
 }
 
 type LoadBalance struct {
 	*GroupBase
 	disableUDP     bool
 	strategyFn     strategyFn
+	strategyStart  func()
+	strategyClose  func()
 	testUrl        string
 	expectedStatus string
 }
@@ -154,7 +166,26 @@ func (lb *LoadBalance) ListenPacketContext(ctx context.Context, metadata *C.Meta
 	return proxy.ListenPacketContext(ctx, metadata)
 }
 
-// SupportUDP implements C.ProxyAdapter
+// Start begins background work owned by the strategy. It is called by the
+// activation point (tunnel.UpdateProxies), never during config parsing, so -t
+// checks and rejected configurations start nothing.
+func (lb *LoadBalance) Start() {
+	if lb.strategyStart != nil {
+		lb.strategyStart()
+	}
+}
+
+// Close releases background work owned by the strategy. The activation point
+// (tunnel.UpdateProxies) closes a replaced load-balance group explicitly; leaf
+// proxies keep their own auto-close finalizers. The strategy's Close is
+// idempotent, so a reload and a late caller may both invoke it.
+func (lb *LoadBalance) Close() error {
+	if lb.strategyClose != nil {
+		lb.strategyClose()
+	}
+	return nil
+}
+
 func (lb *LoadBalance) SupportUDP() bool {
 	return !lb.disableUDP
 }
@@ -287,10 +318,20 @@ func (lb *LoadBalance) Now() string {
 
 func NewLoadBalance(option GroupCommonOption, loadBalanceOption LoadBalanceOption, emptyFallback C.Proxy, providers []P.ProxyProvider) (lb *LoadBalance, err error) {
 	var strategyFn strategyFn
+	var strategyStart func()
+	var strategyClose func()
 	withKey, err := hashKey(loadBalanceOption.HashKey)
 	if err != nil {
 		return nil, err
 	}
+
+	// A `weighted-sticky` block is meaningful only with its own strategy. The
+	// presence flag catches an empty or null block that decoded to nil.
+	hasWeightedStickyBlock := loadBalanceOption.weightedStickyPresent || loadBalanceOption.WeightedSticky != nil
+	if hasWeightedStickyBlock && loadBalanceOption.Strategy != "weighted-sticky" {
+		return nil, errors.New("weighted-sticky options require strategy: weighted-sticky")
+	}
+
 	switch loadBalanceOption.Strategy {
 	case "", "consistent-hashing":
 		strategyFn = strategyConsistentHashing(option.URL, withKey(getKey))
@@ -303,6 +344,29 @@ func NewLoadBalance(option GroupCommonOption, loadBalanceOption LoadBalanceOptio
 		strategyFn = strategyRoundRobin(option.URL)
 	case "sticky-sessions":
 		strategyFn = strategyStickySessions(option.URL, withKey(getKeyWithSrcAndDst))
+	case "weighted-sticky":
+		// The new strategy derives its own scoped key; combining it with the
+		// official hash-key would stack two incompatible key rules.
+		if loadBalanceOption.HashKey != "" {
+			return nil, fmt.Errorf("%w: weighted-sticky derives its own key", errHashKey)
+		}
+		staticNames, dynamic, err := staticCandidateNames(providers)
+		if err != nil {
+			return nil, err
+		}
+		// A single static candidate is allowed. Routing has already selected
+		// this group, and with no alternative there is no node-to-node balancing
+		// to perform. The weighted-sticky session still applies account
+		// admission, so a disabled or grace-restricted node is not bypassed.
+		config, err := weightedsticky.ParseOptions(loadBalanceOption.WeightedSticky, staticNames, dynamic)
+		if err != nil {
+			return nil, err
+		}
+		config.Blacklist = loadBalanceOption.SiteBlacklist
+		strategyFn, strategyStart, strategyClose, err = newWeightedStickyStrategy(option.Name, config, option.URL)
+		if err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("%w: %s", errStrategy, loadBalanceOption.Strategy)
 	}
@@ -321,6 +385,8 @@ func NewLoadBalance(option GroupCommonOption, loadBalanceOption LoadBalanceOptio
 			Providers:      providers,
 		}),
 		strategyFn:     strategyFn,
+		strategyStart:  strategyStart,
+		strategyClose:  strategyClose,
 		disableUDP:     option.DisableUDP,
 		testUrl:        option.URL,
 		expectedStatus: option.ExpectedStatus,

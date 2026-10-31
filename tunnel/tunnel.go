@@ -20,6 +20,7 @@ import (
 	"github.com/metacubex/mihomo/component/process"
 	"github.com/metacubex/mihomo/component/proxydialer"
 	"github.com/metacubex/mihomo/component/resolver"
+	"github.com/metacubex/mihomo/component/retrystate"
 	"github.com/metacubex/mihomo/component/slowdown"
 	"github.com/metacubex/mihomo/component/sniffer"
 	C "github.com/metacubex/mihomo/constant"
@@ -229,9 +230,36 @@ func RuleProviders() map[string]P.RuleProvider {
 // UpdateProxies handle update proxies
 func UpdateProxies(newProxies map[string]C.Proxy, newProviders map[string]P.ProxyProvider) {
 	configMux.Lock()
+	oldProxies := proxies
 	proxies = newProxies
 	providers = newProviders
 	configMux.Unlock()
+
+	// This is the activation point for a parsed configuration: start the
+	// background work of newly accepted groups. Parsing alone (including -t)
+	// never reaches here, so rejected configurations start nothing.
+	for _, proxy := range newProxies {
+		if proxy.Type() != C.LoadBalance {
+			continue
+		}
+		if starter, ok := proxy.Adapter().(interface{ Start() }); ok {
+			starter.Start()
+		}
+	}
+
+	// A replaced load-balance group may own background work (weighted-sticky
+	// resilience: status queries, probe recovery timers). Close it now; its
+	// Close only cancels background tasks, established connections keep their
+	// already-selected adapter. Leaf proxies are left to their auto-close
+	// finalizers because closing them could affect active connections.
+	for name, proxy := range oldProxies {
+		if current, ok := newProxies[name]; ok && current == proxy {
+			continue
+		}
+		if proxy.Type() == C.LoadBalance {
+			_ = proxy.Close()
+		}
+	}
 }
 
 func UpdateListeners(newListeners map[string]C.InboundListener) {
@@ -733,10 +761,22 @@ func shouldStopRetry(err error) bool {
 	if errors.Is(err, loopback.ErrReject) {
 		return true
 	}
+	// A strategy that has no eligible candidate, or that detected an unsafe
+	// replay, can stop this connection's loop without pretending to be an
+	// official reject. Ordinary strategies never implement this.
+	var stopper interface{ StopRetry() bool }
+	if errors.As(err, &stopper) {
+		return stopper.StopRetry()
+	}
 	return false
 }
 
 func retry[T any](ctx context.Context, ft func(context.Context) (T, error), fe func(err error)) (t T, err error) {
+	// One state per official retry loop. It is the only per-connection
+	// selection state; strategies that do not use it are unaffected.
+	ctx, state := retrystate.WithState(ctx)
+	defer state.Finish()
+
 	s := slowdown.New()
 	for i := 0; i < 10; i++ {
 		t, err = ft(ctx)

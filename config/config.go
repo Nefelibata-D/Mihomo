@@ -14,6 +14,7 @@ import (
 	"github.com/metacubex/mihomo/adapter"
 	"github.com/metacubex/mihomo/adapter/outbound"
 	"github.com/metacubex/mihomo/adapter/outboundgroup"
+	weightedsticky "github.com/metacubex/mihomo/adapter/outboundgroup/weighted_sticky_util"
 	"github.com/metacubex/mihomo/adapter/provider"
 	"github.com/metacubex/mihomo/common/orderedmap"
 	"github.com/metacubex/mihomo/common/utils"
@@ -453,6 +454,7 @@ type RawConfig struct {
 	RuleProvider  map[string]map[string]any `yaml:"rule-providers" json:"rule-providers"`
 	Proxy         []map[string]any          `yaml:"proxies" json:"proxies"`
 	ProxyGroup    []map[string]any          `yaml:"proxy-groups" json:"proxy-groups"`
+	SiteBlacklist any                       `yaml:"site-blacklist" json:"site-blacklist"`
 	Rule          []string                  `yaml:"rules" json:"rule"`
 	SubRules      map[string][]string       `yaml:"sub-rules" json:"sub-rules"`
 	Listeners     []map[string]any          `yaml:"listeners" json:"listeners"`
@@ -879,6 +881,10 @@ func parseTLS(cfg *RawConfig) (*TLS, error) {
 
 func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[string]P.ProxyProvider, err error) {
 	proxies = make(map[string]C.Proxy)
+	// Group construction is side-effect free: weighted-sticky strategies start
+	// their status tasks only at the activation point
+	// (tunnel.UpdateProxies), so a later parse failure (rules, DNS, providers)
+	// leaves no background work to clean up here.
 	providersMap = make(map[string]P.ProxyProvider)
 	proxiesConfig := cfg.Proxy
 	groupsConfig := cfg.ProxyGroup
@@ -949,9 +955,34 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 	slices.Sort(AllProxies)
 	slices.Sort(AllProviders)
 
+	blacklistEntries, siteBlacklist, err := weightedsticky.ParseSiteBlacklist(cfg.SiteBlacklist)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(blacklistEntries) > 0 {
+		known := make(map[string]struct{}, len(proxies))
+		for name := range proxies {
+			known[name] = struct{}{}
+		}
+		dynamic := false
+		for _, pd := range providersMap {
+			if pd.VehicleType() != P.Compatible {
+				dynamic = true
+			}
+			for _, proxy := range pd.Proxies() {
+				known[proxy.Name()] = struct{}{}
+			}
+		}
+		for i, entry := range blacklistEntries {
+			if _, ok := known[entry.Proxy]; !ok && !dynamic {
+				return nil, nil, fmt.Errorf("site-blacklist[%d] references unknown proxy %q", i, entry.Proxy)
+			}
+		}
+	}
+
 	// parse proxy group
 	for idx, mapping := range groupsConfig {
-		group, err := outboundgroup.ParseProxyGroup(mapping, proxies, providersMap, AllProxies, AllProviders)
+		group, err := outboundgroup.ParseProxyGroup(mapping, proxies, providersMap, AllProxies, AllProviders, siteBlacklist)
 		if err != nil {
 			return nil, nil, fmt.Errorf("proxy group[%d]: %w", idx, err)
 		}

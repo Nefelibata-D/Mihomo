@@ -7,6 +7,7 @@ import (
 
 	"github.com/dlclark/regexp2"
 
+	weightedsticky "github.com/metacubex/mihomo/adapter/outboundgroup/weighted_sticky_util"
 	"github.com/metacubex/mihomo/adapter/provider"
 	"github.com/metacubex/mihomo/common/structure"
 	"github.com/metacubex/mihomo/common/utils"
@@ -45,7 +46,7 @@ type GroupCommonOption struct {
 	Icon                string   `group:"icon,omitempty"`
 }
 
-func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, providersMap map[string]P.ProxyProvider, AllProxies []string, AllProviders []string) (ProxyGroup, error) {
+func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, providersMap map[string]P.ProxyProvider, AllProxies []string, AllProviders []string, siteBlacklist *weightedsticky.SiteBlacklistIndex) (ProxyGroup, error) {
 	decoder := structure.NewDecoder(structure.Option{TagName: "group", WeaklyTypedInput: true})
 
 	groupOption := GroupCommonOption{
@@ -212,6 +213,15 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		if err != nil {
 			return nil, err
 		}
+		if _, present := config["weighted-sticky"]; present {
+			// Preserve the presence of an empty/null block so the strategy can
+			// reject it instead of treating it as absent.
+			opt.weightedStickyPresent = true
+			if opt.WeightedSticky == nil {
+				opt.WeightedSticky = map[string]any{}
+			}
+		}
+		opt.SiteBlacklist = siteBlacklist
 		return NewLoadBalance(groupOption, opt, emptyFallback, providers)
 	case "relay":
 		return nil, fmt.Errorf("%w: The group [%s] with relay type was removed, please using dialer-proxy instead", errType, groupName)

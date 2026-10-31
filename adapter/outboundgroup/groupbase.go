@@ -322,6 +322,11 @@ func (gb *GroupBase) healthCheck() {
 
 func (gb *GroupBase) onDialSuccess() {
 	if !gb.failedTesting.Load() {
+		// onDialFailed updates failedTimes from an asynchronous goroutine; this
+		// success path runs on the dial goroutine. The counter needs the same
+		// lock on both sides.
+		gb.failedTestMux.Lock()
 		gb.failedTimes = 0
+		gb.failedTestMux.Unlock()
 	}
 }
