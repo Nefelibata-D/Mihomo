@@ -1,0 +1,84 @@
+# Administrator-issued Mihomo subscription template for this fork.
+# Every .invalid address, UUID, REALITY key, domain and node ID below is a
+# placeholder. Replace them with per-user subscription data before delivery.
+# This template can be syntax-checked, but it cannot connect as written.
+
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: false
+
+proxies:
+  - name: 日本出口
+    type: vless
+    server: jp.example.invalid
+    port: 443
+    uuid: 00000000-0000-4000-8000-000000000001
+    network: tcp
+    tls: true
+    udp: true
+    servername: reality-jp.example.invalid
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA
+      short-id: "00000000"
+
+  - name: 美国出口
+    type: vless
+    server: us.example.invalid
+    port: 443
+    uuid: 00000000-0000-4000-8000-000000000001
+    network: tcp
+    tls: true
+    udp: true
+    servername: reality-us.example.invalid
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0A
+      short-id: "00000000"
+
+# Shared by all groups that explicitly enable weighted-sticky. This only
+# influences new bindings; a valid cache binding is tried first.
+site-blacklist:
+  - proxy: 日本出口
+    domains: [sensitive.example.invalid]
+    domain-suffixes: [media.example.invalid]
+
+proxy-groups:
+  # One-node routes need no load balancing. The US node has no JP quota.
+  - name: 美国单节点
+    type: select
+    proxies: [美国出口]
+
+  - name: 默认负载
+    type: load-balance
+    proxies: [日本出口, 美国出口]
+    url: https://health.example.invalid/ready
+    expected-status: 204
+    interval: 300
+    lazy: false
+    strategy: weighted-sticky
+    weighted-sticky:
+      idle-timeout: 300
+      default-weight: 1
+      weights:
+        日本出口: 7
+        美国出口: 3
+      max-bindings: 10000
+      resilience:
+        enabled: true
+        control:
+          base-url: https://control.example.invalid
+          uuid: 00000000-0000-4000-8000-000000000001
+          timeout: 3
+          min-interval: 30
+          grace-interval: 300
+          node-ids:
+            日本出口: jp
+            美国出口: us
+
+rules:
+  # Replace with the domains that should use the single-node group.
+  - DOMAIN-SUFFIX,us-only.example.invalid,美国单节点
+  - MATCH,默认负载

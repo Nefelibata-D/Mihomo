@@ -106,6 +106,8 @@ type Validator struct {
 	onStatusChange func(nodeID string, from, to AccountStatus)
 
 	triggers chan triggerRequest
+	queued   map[string]struct{}
+	known    map[string]struct{}
 	done     chan struct{}
 
 	ctx       context.Context
@@ -156,7 +158,9 @@ func NewValidator(options ValidatorOptions) (*Validator, error) {
 		graceInterval:  options.GraceInterval,
 		clock:          clock,
 		onStatusChange: options.OnStatusChange,
-		triggers:       make(chan triggerRequest, 1),
+		triggers:       make(chan triggerRequest, len(nodes)),
+		queued:         make(map[string]struct{}, len(nodes)),
+		known:          seen,
 		done:           make(chan struct{}),
 		ctx:            ctx,
 		cancel:         cancel,
@@ -179,23 +183,30 @@ func (v *Validator) Start() {
 }
 
 // TriggerFailure reports a business dial failure. It never queues a delayed
-// task: if the validator is not running, a check is in flight, the node is
-// disabled/grace, or the minimum interval has not elapsed, the trigger is
-// dropped.
+// task: if the validator is not running, the node is unknown or already
+// queued, a check is in flight, the node is disabled/grace, or the minimum
+// interval has not elapsed, the trigger is dropped.
 func (v *Validator) TriggerFailure(nodeID string) {
 	if nodeID == "" {
 		return
 	}
 	v.mu.Lock()
-	active := v.started && !v.closed
-	v.mu.Unlock()
-	if !active {
+	if !v.started || v.closed {
+		v.mu.Unlock()
 		return
 	}
-	select {
-	case v.triggers <- triggerRequest{node: nodeID}:
-	default:
+	if _, known := v.known[nodeID]; !known {
+		v.mu.Unlock()
+		return
 	}
+	if _, queued := v.queued[nodeID]; queued {
+		v.mu.Unlock()
+		return
+	}
+	v.queued[nodeID] = struct{}{}
+	// One queued request per known node keeps the channel within its capacity.
+	v.triggers <- triggerRequest{node: nodeID}
+	v.mu.Unlock()
 }
 
 // Close cancels all timers and in-flight queries. Results from a cancelled
@@ -310,6 +321,9 @@ func (v *Validator) loop(ctx context.Context) {
 			}
 
 		case request := <-v.triggers:
+			v.mu.Lock()
+			delete(v.queued, request.node)
+			v.mu.Unlock()
 			node := request.node
 			if inflight[node] {
 				continue
