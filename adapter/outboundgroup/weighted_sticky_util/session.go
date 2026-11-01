@@ -70,6 +70,11 @@ type dialSession struct {
 	order   []string
 	blocked map[string]struct{}
 
+	flow        string
+	attempts    int
+	graceLogged bool
+	lastFailed  string
+
 	handle       *Handle
 	originalName string
 	fresh        bool
@@ -87,10 +92,15 @@ type dialSession struct {
 }
 
 func newDialSession(strategy *Strategy, key, host string) *dialSession {
+	flow := ""
+	if strategy.diagEnabled() {
+		flow = newDiagFlowID()
+	}
 	return &dialSession{
 		strategy: strategy,
 		key:      key,
 		host:     host,
+		flow:     flow,
 		blocked:  strategy.blacklistedSet(host),
 	}
 }
@@ -112,7 +122,7 @@ func (s *dialSession) ensureInit(candidates []C.Proxy) error {
 
 	handle, err := s.strategy.cache.Acquire(s.key,
 		func() (string, error) {
-			return s.strategy.chooseFresh(candidates, s.host)
+			return s.strategy.chooseFresh(candidates, s.key, s.host, s.flow)
 		},
 		func(name string) bool {
 			proxy, ok := findCandidate(candidates, name)
@@ -127,6 +137,9 @@ func (s *dialSession) ensureInit(candidates []C.Proxy) error {
 	s.handle = handle
 	s.originalName = handle.ProxyName()
 	s.fresh = handle.Fresh()
+	if !s.fresh {
+		s.strategy.diagAddCount(s.originalName, diagMetricCacheReuse, 1)
+	}
 	s.sticky = 3
 	if s.fresh {
 		s.sticky = 1
@@ -150,6 +163,8 @@ func (s *dialSession) next(current []C.Proxy) (C.Proxy, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	diagOn := s.strategy.diagEnabled()
+
 	if s.handle == nil || s.exhausted {
 		return nil, stopRetry(ErrNoAvailableCandidates)
 	}
@@ -157,15 +172,43 @@ func (s *dialSession) next(current []C.Proxy) (C.Proxy, error) {
 	if s.sticky > 0 {
 		if proxy, ok := findCandidate(current, s.originalName); ok && s.eligible(proxy) {
 			s.sticky--
+			if diagOn {
+				s.attempts++
+			}
+			if diagOn && !s.fresh && !s.graceLogged && s.strategy.diagStatus(proxy) == AccountStatusGrace {
+				s.graceLogged = true
+				s.strategy.diagEmit("selection.use", s.flow, map[string]any{
+					"reason":   "grace_reuse",
+					"node":     proxy.Name(),
+					"original": s.originalName,
+					"attempt":  s.attempts,
+				})
+			}
 			return proxy, nil
 		}
 		// The bound node was skipped. Sticky priority is offered once at the
 		// head of the connection; it is not deferred to a later rotation.
 		s.sticky = 0
+		if diagOn {
+			s.strategy.diagEmit("selection.blocked", s.flow, map[string]any{
+				"reason":         "original_skipped",
+				"node":           s.originalName,
+				"original":       s.originalName,
+				"attempt":        s.attempts + 1,
+				"blacklist_hits": diagBlacklistHits(current, s.blocked),
+			})
+		}
 	}
 
 	if len(s.order) == 0 {
 		s.exhausted = true
+		if diagOn {
+			s.strategy.diagEmit("selection.blocked", s.flow, map[string]any{
+				"reason":         "no_candidate",
+				"original":       s.originalName,
+				"blacklist_hits": diagBlacklistHits(current, s.blocked),
+			})
+		}
 		return nil, stopRetry(ErrNoAvailableCandidates)
 	}
 	for i := 0; i < len(s.order); i++ {
@@ -178,12 +221,63 @@ func (s *dialSession) next(current []C.Proxy) (C.Proxy, error) {
 			continue
 		}
 		if s.rotationEligible(current, proxy) {
+			if diagOn {
+				s.attempts++
+			}
+			if diagOn {
+				s.strategy.diagEmit("selection.use", s.flow, map[string]any{
+					"reason":         "rotation",
+					"node":           proxy.Name(),
+					"original":       s.originalName,
+					"attempt":        s.attempts,
+					"blacklist_hits": diagBlacklistHits(current, s.blocked),
+				})
+			}
 			return proxy, nil
 		}
 	}
 
 	s.exhausted = true
+	if diagOn {
+		s.strategy.diagEmit("selection.blocked", s.flow, map[string]any{
+			"reason":         "no_candidate",
+			"original":       s.originalName,
+			"blacklist_hits": diagBlacklistHits(current, s.blocked),
+		})
+	}
 	return nil, stopRetry(ErrNoAvailableCandidates)
+}
+
+func (s *dialSession) attemptCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attempts
+}
+
+// noteFailure and noteSuccess maintain observation state for switch detection.
+// They never change the attempt order, admission rules or retry control flow.
+func (s *dialSession) noteFailure(proxy C.Proxy) {
+	if proxy == nil || !s.strategy.diagEnabled() {
+		return
+	}
+	s.mu.Lock()
+	s.lastFailed = proxy.Name()
+	s.mu.Unlock()
+}
+
+func (s *dialSession) noteSuccess(proxy C.Proxy) (bool, string) {
+	if proxy == nil || !s.strategy.diagEnabled() {
+		return false, ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastFailed == "" {
+		return false, ""
+	}
+	if s.lastFailed == proxy.Name() {
+		return false, ""
+	}
+	return true, s.lastFailed
 }
 
 // eligible keeps the connection's original binding qualified under grace even
@@ -350,12 +444,28 @@ func (s *Strategy) attemptFailed(proxy C.Proxy) {
 // firstFailureHook runs after a connection failed on its first write or first
 // read. The current request is not replayed and no state is shared with the
 // next connection; the failure only starts the rate-limited management query.
-func (s *Strategy) firstFailureHook(proxy C.Proxy) func(failurePhase, error) {
+func (s *Strategy) firstFailureHook(proxy C.Proxy, session *dialSession, attempt int) func(failurePhase, error) {
 	if proxy == nil {
 		return nil
 	}
 	return func(phase failurePhase, err error) {
 		log.Debugln("weighted-sticky [%s]: first %s on %q failed: %v", s.name, phase, proxy.Name(), err)
+		if s.diagEnabled() {
+			flow := ""
+			if session != nil {
+				flow = session.flow
+			}
+			s.diagEmit("first_io.failure", flow, map[string]any{
+				"node":        proxy.Name(),
+				"stage":       phase.String(),
+				"error_class": diagErrorClass(err),
+				"attempt":     attempt,
+			})
+			s.diagAddCount(proxy.Name(), diagMetricFailure, 1)
+		}
+		if session != nil {
+			session.noteFailure(proxy)
+		}
 		s.attemptFailed(proxy)
 	}
 }

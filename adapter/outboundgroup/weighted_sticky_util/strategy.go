@@ -59,6 +59,9 @@ type Strategy struct {
 	randIntn func(int) int
 	alive    func(C.Proxy) bool
 
+	diag         diagEmitter
+	diagInstance string
+
 	policy    *PolicyStore
 	validator *Validator
 	nodeIDs   map[string]string
@@ -95,11 +98,13 @@ func NewStrategy(options StrategyOptions) (*Strategy, error) {
 		}
 	}
 	strategy := &Strategy{
-		name:     options.Name,
-		config:   options.Config,
-		cache:    NewCache(options.Config.MaxBindings, options.Config.IdleTimeout, now),
-		randIntn: randIntn,
-		alive:    alive,
+		name:         options.Name,
+		config:       options.Config,
+		cache:        NewCache(options.Config.MaxBindings, options.Config.IdleTimeout, now),
+		randIntn:     randIntn,
+		alive:        alive,
+		diag:         newProcessDiag(),
+		diagInstance: newDiagInstanceID(),
 	}
 
 	resilience := options.Config.Resilience
@@ -146,13 +151,19 @@ func NewStrategy(options StrategyOptions) (*Strategy, error) {
 		GraceInterval: resilience.Control.GraceInterval,
 		Clock:         clock,
 		OnStatusChange: func(nodeID string, from, to AccountStatus) {
-			if to != AccountStatusDisabled {
-				return
+			if to == AccountStatusDisabled {
+				for _, proxyName := range strategy.byNode[nodeID] {
+					strategy.cache.InvalidateNode(proxyName)
+				}
+				log.Debugln("weighted-sticky [%s]: node %s for this account is disabled; bindings invalidated", strategy.name, nodeID)
 			}
-			for _, proxyName := range strategy.byNode[nodeID] {
-				strategy.cache.InvalidateNode(proxyName)
+			if strategy.diagEnabled() {
+				strategy.diagEmit("status.change", "", map[string]any{
+					"node_id": nodeID,
+					"from":    from.String(),
+					"to":      to.String(),
+				})
 			}
-			log.Debugln("weighted-sticky [%s]: node %s for this account is disabled; bindings invalidated", strategy.name, nodeID)
 		},
 	})
 	if err != nil {
@@ -171,6 +182,7 @@ func (s *Strategy) Start() {
 		return
 	}
 	s.started = true
+	s.diag.Register(s.diagInstance, s.name, s.diagConfig())
 	validator := s.validator
 	s.mu.Unlock()
 	if validator != nil {
@@ -183,10 +195,14 @@ func (s *Strategy) Start() {
 func (s *Strategy) Close() {
 	s.mu.Lock()
 	s.closed = true
+	started := s.started
 	s.mu.Unlock()
 	s.closeOnce.Do(func() {
 		if s.validator != nil {
 			s.validator.Close()
+		}
+		if started {
+			s.diag.Unregister(s.diagInstance)
 		}
 	})
 }
@@ -201,6 +217,9 @@ func (s *Strategy) SelectProxy(proxies []C.Proxy, metadata *C.Metadata, touch bo
 		return s.unavailable(err)
 	}
 	if len(candidates) == 0 {
+		if touch && s.diagEnabled() {
+			s.diagEmit("selection.blocked", "", map[string]any{"reason": "no_candidates"})
+		}
 		return s.unavailable(ErrNoAvailableCandidates)
 	}
 
@@ -222,6 +241,13 @@ func (s *Strategy) SelectProxy(proxies []C.Proxy, metadata *C.Metadata, touch bo
 	// metadata (name/type) and fails early when no candidate is possible.
 	preview := s.preview(candidates, key, host)
 	if _, unavailable := preview.(*unavailableProxy); unavailable {
+		if touch && s.diagEnabled() {
+			s.diagEmit("selection.blocked", "", map[string]any{
+				"reason":         "no_admitted_candidate",
+				"candidates":     diagCandidateNames(candidates),
+				"blacklist_hits": diagBlacklistHits(candidates, s.blacklistedSet(host)),
+			})
+		}
 		return preview
 	}
 	return &resilientProxy{
@@ -274,9 +300,22 @@ func (s *Strategy) preview(candidates []C.Proxy, key, host string) C.Proxy {
 // one draw. Official health orders the draw: healthy candidates are preferred
 // when any exist, but when every record says unhealthy the strategy still
 // chooses among the admitted candidates and lets the actual dial decide.
-func (s *Strategy) chooseFresh(candidates []C.Proxy, host string) (string, error) {
+func (s *Strategy) chooseFresh(candidates []C.Proxy, key, host, flow string) (string, error) {
+	diagOn := s.diagEnabled()
+	var blocked map[string]struct{}
+	if diagOn {
+		blocked = s.blacklistedSet(host)
+	}
+
 	scoped := s.newScopedCandidates(candidates, host)
 	if len(scoped) == 0 {
+		if diagOn {
+			s.diagEmit("selection.blocked", flow, map[string]any{
+				"reason":         "no_admitted_candidate",
+				"candidates":     diagCandidateNames(candidates),
+				"blacklist_hits": diagBlacklistHits(candidates, blocked),
+			})
+		}
 		return "", ErrNoAvailableCandidates
 	}
 
@@ -301,7 +340,45 @@ func (s *Strategy) chooseFresh(candidates []C.Proxy, host string) (string, error
 
 	selected, err := SelectCandidate(pool, s.config.Weights, s.config.DefaultWeight, s.randIntn)
 	if err != nil {
+		if diagOn {
+			s.diagEmit("selection.blocked", flow, map[string]any{
+				"reason":         "draw_failed",
+				"error_class":    diagDrawErrorClass(err),
+				"candidates":     diagCandidateNames(candidates),
+				"blacklist_hits": diagBlacklistHits(candidates, blocked),
+			})
+		}
 		return "", err
+	}
+
+	if diagOn {
+		healthMode := "all_unhealthy"
+		if len(healthy) == len(scoped) {
+			healthMode = "all_healthy"
+		} else if len(healthy) > 0 {
+			healthMode = "healthy_only"
+		}
+		poolWeights, total := s.diagPool(pool)
+		blacklistFallback := false
+		for _, proxy := range scoped {
+			if _, ok := blocked[proxy.Name()]; ok {
+				blacklistFallback = true
+				break
+			}
+		}
+		siteType, site := diagSite(key)
+		s.diagEmit("selection.draw", flow, map[string]any{
+			"binding":            s.diagKeyID(key),
+			"site_type":          siteType,
+			"site":               site,
+			"pool":               poolWeights,
+			"total_weight":       total,
+			"selected":           selected.Name(),
+			"health_mode":        healthMode,
+			"blacklist_hits":     diagBlacklistHits(candidates, blocked),
+			"blacklist_fallback": blacklistFallback,
+		})
+		s.diagAddCount(selected.Name(), diagMetricDraw, 1)
 	}
 	return selected.Name(), nil
 }

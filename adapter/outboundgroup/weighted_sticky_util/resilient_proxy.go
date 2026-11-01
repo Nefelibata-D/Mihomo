@@ -37,18 +37,40 @@ func (p *resilientProxy) DialContext(ctx context.Context, metadata *C.Metadata) 
 	if err != nil {
 		return nil, err
 	}
+	attempt := session.attemptCount()
+	p.strategy.diagAddCount(proxy.Name(), diagMetricAttempt, 1)
 
 	conn, err := proxy.DialContext(ctx, metadata)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, stopRetry(ctxErr)
 		}
+		if p.strategy.diagEnabled() {
+			p.strategy.diagEmit("dial.failure", session.flow, map[string]any{
+				"node":        proxy.Name(),
+				"stage":       "dial",
+				"error_class": diagErrorClass(err),
+				"attempt":     attempt,
+			})
+			p.strategy.diagAddCount(proxy.Name(), diagMetricFailure, 1)
+		}
+		session.noteFailure(proxy)
 		// A dial failure is safe to retry by the official loop. It is also the
 		// trigger for the rate-limited management status query.
 		p.strategy.attemptFailed(proxy)
 		return nil, err
 	}
 	if conn == nil {
+		if p.strategy.diagEnabled() {
+			p.strategy.diagEmit("dial.failure", session.flow, map[string]any{
+				"node":        proxy.Name(),
+				"stage":       "dial",
+				"error_class": "nil_connection",
+				"attempt":     attempt,
+			})
+			p.strategy.diagAddCount(proxy.Name(), diagMetricFailure, 1)
+		}
+		session.noteFailure(proxy)
 		return nil, errors.New("weighted-sticky: candidate returned a nil connection")
 	}
 
@@ -68,13 +90,24 @@ func (p *resilientProxy) DialContext(ctx context.Context, metadata *C.Metadata) 
 		_ = conn.Close()
 		return nil, stopRetry(ErrNoAvailableCandidates)
 	}
+	if switched, from := session.noteSuccess(proxy); switched {
+		if p.strategy.diagEnabled() {
+			p.strategy.diagEmit("dial.switch_open", session.flow, map[string]any{
+				"node":    proxy.Name(),
+				"from":    from,
+				"stage":   "dial",
+				"attempt": attempt,
+			})
+			p.strategy.diagAddCount(proxy.Name(), diagMetricSwitchOpen, 1)
+		}
+	}
 	if !N.NeedHandshake(conn) {
 		handle.Commit()
 	}
 	return &wsConn{
 		Conn:      conn,
 		handle:    handle,
-		onFailure: p.strategy.firstFailureHook(proxy),
+		onFailure: p.strategy.firstFailureHook(proxy, session, attempt),
 	}, nil
 }
 
@@ -91,16 +124,38 @@ func (p *resilientProxy) ListenPacketContext(ctx context.Context, metadata *C.Me
 	if err != nil {
 		return nil, err
 	}
+	attempt := session.attemptCount()
+	p.strategy.diagAddCount(proxy.Name(), diagMetricAttempt, 1)
 
 	conn, err := proxy.ListenPacketContext(ctx, metadata)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, stopRetry(ctxErr)
 		}
+		if p.strategy.diagEnabled() {
+			p.strategy.diagEmit("dial.failure", session.flow, map[string]any{
+				"node":        proxy.Name(),
+				"stage":       "packet",
+				"error_class": diagErrorClass(err),
+				"attempt":     attempt,
+			})
+			p.strategy.diagAddCount(proxy.Name(), diagMetricFailure, 1)
+		}
+		session.noteFailure(proxy)
 		p.strategy.attemptFailed(proxy)
 		return nil, err
 	}
 	if conn == nil {
+		if p.strategy.diagEnabled() {
+			p.strategy.diagEmit("dial.failure", session.flow, map[string]any{
+				"node":        proxy.Name(),
+				"stage":       "packet",
+				"error_class": "nil_packet_connection",
+				"attempt":     attempt,
+			})
+			p.strategy.diagAddCount(proxy.Name(), diagMetricFailure, 1)
+		}
+		session.noteFailure(proxy)
 		return nil, errors.New("weighted-sticky: candidate returned a nil packet connection")
 	}
 
@@ -121,5 +176,16 @@ func (p *resilientProxy) ListenPacketContext(ctx context.Context, metadata *C.Me
 		return nil, stopRetry(ErrNoAvailableCandidates)
 	}
 	handle.Commit()
+	if switched, from := session.noteSuccess(proxy); switched {
+		if p.strategy.diagEnabled() {
+			p.strategy.diagEmit("dial.switch_open", session.flow, map[string]any{
+				"node":    proxy.Name(),
+				"from":    from,
+				"stage":   "packet",
+				"attempt": attempt,
+			})
+			p.strategy.diagAddCount(proxy.Name(), diagMetricSwitchOpen, 1)
+		}
+	}
 	return &wsPacketConn{PacketConn: conn, handle: handle}, nil
 }
