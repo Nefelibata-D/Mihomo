@@ -25,7 +25,7 @@ type resilientProxy struct {
 var _ C.Proxy = (*resilientProxy)(nil)
 
 func (p *resilientProxy) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
-	session, finish, err := p.strategy.sessionFor(ctx, p.key, p.host, p.candidates)
+	session, finish, err := p.strategy.sessionFor(ctx, p.key, p.host, p.candidates, metadata)
 	if finish != nil {
 		defer finish()
 	}
@@ -112,7 +112,7 @@ func (p *resilientProxy) DialContext(ctx context.Context, metadata *C.Metadata) 
 }
 
 func (p *resilientProxy) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (C.PacketConn, error) {
-	session, finish, err := p.strategy.sessionFor(ctx, p.key, p.host, p.candidates)
+	session, finish, err := p.strategy.sessionFor(ctx, p.key, p.host, p.candidates, metadata)
 	if finish != nil {
 		defer finish()
 	}

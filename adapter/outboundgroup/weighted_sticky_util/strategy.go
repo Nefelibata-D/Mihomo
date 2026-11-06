@@ -229,7 +229,7 @@ func (s *Strategy) SelectProxy(proxies []C.Proxy, metadata *C.Metadata, touch bo
 	}
 
 	if !touch {
-		return s.preview(candidates, key, host)
+		return s.preview(candidates, key, metadata)
 	}
 
 	// Provider deletions and replacements are reconciled only on a real
@@ -239,13 +239,13 @@ func (s *Strategy) SelectProxy(proxies []C.Proxy, metadata *C.Metadata, touch bo
 	// Selection itself is deferred to DialContext, where the official retry
 	// state identifies this connection. The preview only supplies the proxy
 	// metadata (name/type) and fails early when no candidate is possible.
-	preview := s.preview(candidates, key, host)
+	preview := s.preview(candidates, key, metadata)
 	if _, unavailable := preview.(*unavailableProxy); unavailable {
 		if touch && s.diagEnabled() {
 			s.diagEmit("selection.blocked", "", map[string]any{
 				"reason":         "no_admitted_candidate",
 				"candidates":     diagCandidateNames(candidates),
-				"blacklist_hits": diagBlacklistHits(candidates, s.blacklistedSet(host)),
+				"blacklist_hits": diagBlacklistHits(candidates, s.blacklistedSet(metadata)),
 			})
 		}
 		return preview
@@ -260,8 +260,7 @@ func (s *Strategy) SelectProxy(proxies []C.Proxy, metadata *C.Metadata, touch bo
 }
 
 // bindingKey resolves the website cache key and the request host used by the
-// blacklist. The cache key includes the inbound identity; the blacklist only
-// looks at the current request domain.
+// blacklist. The cache key includes the inbound identity, never the process.
 func (s *Strategy) bindingKey(metadata *C.Metadata) (key, host string, err error) {
 	key, err = BindingKey(metadata, s.config.Sites)
 	if err != nil {
@@ -277,14 +276,14 @@ func (s *Strategy) bindingKey(metadata *C.Metadata) (key, host string, err error
 // preview implements Unwrap(metadata, false): it reports the currently bound
 // candidate when one exists, otherwise a deterministic eligible candidate for
 // type inspection. It neither creates nor renews a binding.
-func (s *Strategy) preview(candidates []C.Proxy, key, host string) C.Proxy {
+func (s *Strategy) preview(candidates []C.Proxy, key string, metadata *C.Metadata) C.Proxy {
 	if name, ok := s.cache.Lookup(key); ok {
 		if proxy, found := findCandidate(candidates, name); found && s.bindingUsable(proxy) {
 			return proxy
 		}
 	}
 
-	scoped := s.newScopedCandidates(candidates, host)
+	scoped := s.newScopedCandidates(candidates, metadata)
 	for _, proxy := range scoped {
 		if s.alive(proxy) {
 			return proxy
@@ -300,14 +299,14 @@ func (s *Strategy) preview(candidates []C.Proxy, key, host string) C.Proxy {
 // one draw. Official health orders the draw: healthy candidates are preferred
 // when any exist, but when every record says unhealthy the strategy still
 // chooses among the admitted candidates and lets the actual dial decide.
-func (s *Strategy) chooseFresh(candidates []C.Proxy, key, host, flow string) (string, error) {
+func (s *Strategy) chooseFresh(candidates []C.Proxy, key string, metadata *C.Metadata, flow string) (string, error) {
 	diagOn := s.diagEnabled()
 	var blocked map[string]struct{}
 	if diagOn {
-		blocked = s.blacklistedSet(host)
+		blocked = s.blacklistedSet(metadata)
 	}
 
-	scoped := s.newScopedCandidates(candidates, host)
+	scoped := s.newScopedCandidates(candidates, metadata)
 	if len(scoped) == 0 {
 		if diagOn {
 			s.diagEmit("selection.blocked", flow, map[string]any{
@@ -387,7 +386,7 @@ func (s *Strategy) chooseFresh(candidates []C.Proxy, key, host, flow string) (st
 // Only positive-weight nodes that may receive a new binding are considered.
 // Blacklisted nodes enter the candidate set only when no non-blacklisted
 // admitted node exists.
-func (s *Strategy) newScopedCandidates(candidates []C.Proxy, host string) []C.Proxy {
+func (s *Strategy) newScopedCandidates(candidates []C.Proxy, metadata *C.Metadata) []C.Proxy {
 	admitted := make([]C.Proxy, 0, len(candidates))
 	for _, proxy := range candidates {
 		if s.newBindingEligible(proxy) {
@@ -398,7 +397,7 @@ func (s *Strategy) newScopedCandidates(candidates []C.Proxy, host string) []C.Pr
 		return nil
 	}
 
-	blocked := s.blacklistedSet(host)
+	blocked := s.blacklistedSet(metadata)
 	if len(blocked) == 0 {
 		return admitted
 	}
@@ -414,11 +413,11 @@ func (s *Strategy) newScopedCandidates(candidates []C.Proxy, host string) []C.Pr
 	return admitted
 }
 
-func (s *Strategy) blacklistedSet(host string) map[string]struct{} {
-	if host == "" || s.config.Blacklist == nil {
+func (s *Strategy) blacklistedSet(metadata *C.Metadata) map[string]struct{} {
+	if metadata == nil || s.config.Blacklist == nil {
 		return nil
 	}
-	return s.config.Blacklist.Match(host)
+	return s.config.Blacklist.Match(metadata)
 }
 
 // bindingUsable decides whether an existing cached binding may serve a new

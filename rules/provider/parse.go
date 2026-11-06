@@ -25,7 +25,7 @@ type ruleProviderSchema struct {
 	PathInBundle string              `provider:"path-in-bundle,omitempty"`
 }
 
-func ParseRuleProvider(name string, mapping map[string]any, parse common.ParseRuleFunc, makeBundleFile func(pathInBundle string) resource.BundleFile, domainOnly ...bool) (P.RuleProvider, error) {
+func ParseRuleProvider(name string, mapping map[string]any, parse common.ParseRuleFunc, makeBundleFile func(pathInBundle string) resource.BundleFile, blacklistOnly ...bool) (P.RuleProvider, error) {
 	schema := &ruleProviderSchema{}
 	decoder := structure.NewDecoder(structure.Option{TagName: "provider", WeaklyTypedInput: true})
 	if err := decoder.Decode(mapping, schema); err != nil {
@@ -40,13 +40,13 @@ func ParseRuleProvider(name string, mapping map[string]any, parse common.ParseRu
 		return nil, err
 	}
 
-	strict := len(domainOnly) > 0 && domainOnly[0]
+	strict := len(blacklistOnly) > 0 && blacklistOnly[0]
 	if strict && (behavior != P.Classical || format == P.MrsRule) {
 		return nil, fmt.Errorf("blacklist rule-set %s requires classical yaml or text", name)
 	}
 	if strict {
 		strategy := NewClassicalStrategy(parse)
-		strategy.domainOnly = true
+		strategy.blacklistOnly = true
 		rulesParseInline(schema.Payload, strategy)
 		if strategy.err != nil {
 			return nil, strategy.err

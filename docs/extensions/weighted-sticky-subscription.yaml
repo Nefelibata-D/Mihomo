@@ -12,7 +12,10 @@
 #     domain-suffixes: [example.invalid]
 # 完整匹配优先，其次为最长后缀；域名统一转为小写、IDN ASCII 并移除末尾点。
 #
-# site-blacklist 按当前完整域名匹配，仅影响新绑定，不撤销已有有效绑定。
+# site-blacklist 支持 DOMAIN / PROCESS（名称、路径及正则/通配符）规则。
+# 匹配当前连接元数据；绑定索引仍按域名，仅影响新绑定，不撤销已有有效绑定。
+# Process lookup follows the selected proxy chain, including listeners.proxy; find-process-mode is respected.
+# Domain matching uses normalized Host (lowercase, trailing dot removed, IDN ASCII), not SniffHost.
 # 有未被列入黑名单的获准节点时优先使用；全部被列入时仍允许尝试。
 # 条目可加 group: 默认负载 限定策略组；省略时作用于所有 weighted-sticky 组。
 # rules 支持 DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / DOMAIN-REGEX /

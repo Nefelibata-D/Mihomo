@@ -11,10 +11,11 @@ import (
 )
 
 type SiteBlacklistEntry struct {
-	Proxy     string
-	Group     string
-	rules     []C.Rule
-	providers []string
+	Proxy        string
+	Group        string
+	rules        []C.Rule
+	providers    []string
+	needsProcess bool
 }
 
 type SiteBlacklistIndex struct {
@@ -76,12 +77,16 @@ func ParseSiteBlacklist(value any) ([]SiteBlacklistEntry, *SiteBlacklistIndex, e
 			switch kind {
 			case "RULE-SET":
 				entry.providers = append(entry.providers, payload)
-			case "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-REGEX", "DOMAIN-WILDCARD":
+			case "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-REGEX", "DOMAIN-WILDCARD", "PROCESS-NAME", "PROCESS-PATH", "PROCESS-NAME-REGEX", "PROCESS-PATH-REGEX", "PROCESS-NAME-WILDCARD", "PROCESS-PATH-WILDCARD":
 				rule, err := R.ParseRule(kind, payload, "", nil, nil)
 				if err != nil {
 					return nil, nil, err
 				}
 				entry.rules = append(entry.rules, rule)
+				switch rule.RuleType() {
+				case C.ProcessName, C.ProcessPath, C.ProcessNameRegex, C.ProcessPathRegex, C.ProcessNameWildcard, C.ProcessPathWildcard:
+					entry.needsProcess = true
+				}
 			default:
 				return nil, nil, fmt.Errorf("unsupported blacklist rule %q", line)
 			}
@@ -116,12 +121,19 @@ func (index *SiteBlacklistIndex) BindProviders(providers map[string]P.RuleProvid
 	return nil
 }
 
-func (index *SiteBlacklistIndex) Match(host string) map[string]struct{} {
-	if index == nil || host == "" {
+func (index *SiteBlacklistIndex) Match(metadata *C.Metadata) map[string]struct{} {
+	if index == nil || metadata == nil {
 		return nil
 	}
+	host, err := siteHost(metadata)
+	if err != nil {
+		return nil
+	}
+	normalized := *metadata
+	normalized.Host = host
+	normalized.SniffHost = ""
+	metadata = &normalized
 	matches := map[string]struct{}{}
-	metadata := &C.Metadata{Host: host}
 	source := index
 	if index.source != nil {
 		source = index.source
@@ -136,6 +148,9 @@ func (index *SiteBlacklistIndex) Match(host string) map[string]struct{} {
 				break
 			}
 		}
+		if _, matched := matches[entry.Proxy]; matched {
+			continue
+		}
 		for _, name := range entry.providers {
 			if provider := source.providers[name]; provider != nil && provider.Match(metadata, C.RuleMatchHelper{}) {
 				matches[entry.Proxy] = struct{}{}
@@ -147,6 +162,33 @@ func (index *SiteBlacklistIndex) Match(host string) map[string]struct{} {
 }
 
 func (index *SiteBlacklistIndex) Blacklisted(host, proxy string) bool {
-	_, ok := index.Match(host)[proxy]
+	_, ok := index.Match(&C.Metadata{Host: host})[proxy]
 	return ok
+}
+
+// NeedsProcess checks the current provider strategy after each provider update.
+func (index *SiteBlacklistIndex) NeedsProcess() bool {
+	if index == nil {
+		return false
+	}
+	source := index
+	if index.source != nil {
+		source = index.source
+	}
+	for _, entry := range source.entries {
+		if entry.Group != "" && entry.Group != index.group {
+			continue
+		}
+		if entry.needsProcess {
+			return true
+		}
+		for _, name := range entry.providers {
+			if provider := source.providers[name]; provider != nil {
+				if strategy, ok := provider.Strategy().(interface{ NeedsProcess() bool }); ok && strategy.NeedsProcess() {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

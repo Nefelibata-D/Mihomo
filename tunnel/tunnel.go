@@ -343,14 +343,6 @@ func preHandleMetadata(metadata *C.Metadata) error {
 }
 
 func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err error) {
-	if metadata.SpecialProxy != "" {
-		var exist bool
-		proxy, exist = proxies[metadata.SpecialProxy]
-		if !exist {
-			err = fmt.Errorf("proxy %s not found", metadata.SpecialProxy)
-		}
-		return
-	}
 	var (
 		resolved             bool
 		attemptProcessLookup = metadata.Type != C.INNER
@@ -426,6 +418,19 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 		helper.FindProcess = nil
 	}
 
+	defer func() {
+		prepareProxyProcess(proxy, metadata, helper.FindProcess)
+	}()
+
+	if metadata.SpecialProxy != "" {
+		var exist bool
+		proxy, exist = proxies[metadata.SpecialProxy]
+		if !exist {
+			err = fmt.Errorf("proxy %s not found", metadata.SpecialProxy)
+		}
+		return
+	}
+
 	switch mode {
 	case Direct:
 		proxy = proxies["DIRECT"]
@@ -436,6 +441,20 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 		proxy, rule, err = match(metadata, helper)
 	}
 	return
+}
+
+// prepareProxyProcess follows only the selected chain and resolves process metadata
+// before a consumer's Unwrap can inspect its candidates.
+func prepareProxyProcess(proxy C.Proxy, metadata *C.Metadata, findProcess func()) {
+	if findProcess == nil {
+		return
+	}
+	for current := proxy; current != nil; current = current.Unwrap(metadata, false) {
+		if consumer, ok := current.Adapter().(interface{ NeedsProcessMetadata() bool }); ok && consumer.NeedsProcessMetadata() {
+			findProcess()
+			return
+		}
+	}
 }
 
 // processUDP starts a loop to handle udp packet

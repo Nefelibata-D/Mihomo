@@ -122,7 +122,7 @@ func (rp *RuleSetProvider) Close() error {
 	return rp.ruleSetProvider.Close()
 }
 
-func NewRuleSetProvider(name string, behavior P.RuleBehavior, format P.RuleFormat, interval time.Duration, vehicle P.Vehicle, payload []string, bundleFile resource.BundleFile, parse common.ParseRuleFunc, domainOnly ...bool) P.RuleProvider {
+func NewRuleSetProvider(name string, behavior P.RuleBehavior, format P.RuleFormat, interval time.Duration, vehicle P.Vehicle, payload []string, bundleFile resource.BundleFile, parse common.ParseRuleFunc, blacklistOnly ...bool) P.RuleProvider {
 	rp := &ruleSetProvider{
 		baseProvider: baseProvider{
 			behavior: behavior,
@@ -135,12 +135,12 @@ func NewRuleSetProvider(name string, behavior P.RuleBehavior, format P.RuleForma
 		tunnel.RuleUpdateCallback().Emit(rp)
 	}
 
-	rp.strategy = newStrategy(behavior, parse, domainOnly...)
+	rp.strategy = newStrategy(behavior, parse, blacklistOnly...)
 	if len(payload) > 0 { // using as fallback rules
 		rp.strategy = rulesParseInline(payload, rp.strategy)
 	}
 	rp.Fetcher = resource.NewFetcher(name, interval, vehicle, bundleFile, func(bytes []byte) (ruleStrategy, error) {
-		return rulesParse(bytes, newStrategy(behavior, parse, domainOnly...), format)
+		return rulesParse(bytes, newStrategy(behavior, parse, blacklistOnly...), format)
 	}, onUpdate)
 
 	wrapper := &RuleSetProvider{
@@ -151,7 +151,7 @@ func NewRuleSetProvider(name string, behavior P.RuleBehavior, format P.RuleForma
 	return wrapper
 }
 
-func newStrategy(behavior P.RuleBehavior, parse common.ParseRuleFunc, domainOnly ...bool) ruleStrategy {
+func newStrategy(behavior P.RuleBehavior, parse common.ParseRuleFunc, blacklistOnly ...bool) ruleStrategy {
 	switch behavior {
 	case P.Domain:
 		strategy := NewDomainStrategy()
@@ -161,7 +161,7 @@ func newStrategy(behavior P.RuleBehavior, parse common.ParseRuleFunc, domainOnly
 		return strategy
 	case P.Classical:
 		strategy := NewClassicalStrategy(parse)
-		strategy.domainOnly = len(domainOnly) > 0 && domainOnly[0]
+		strategy.blacklistOnly = len(blacklistOnly) > 0 && blacklistOnly[0]
 		return strategy
 	default:
 		return nil
@@ -177,7 +177,7 @@ func rulesParse(buf []byte, strategy ruleStrategy, format P.RuleFormat) (ruleStr
 	strategy.Reset()
 	// Blacklist updates are atomic: parse the complete YAML document before
 	// accepting any rules, including flow-style payload lists.
-	if classical, ok := strategy.(*classicalStrategy); ok && classical.domainOnly && format == P.YamlRule {
+	if classical, ok := strategy.(*classicalStrategy); ok && classical.blacklistOnly && format == P.YamlRule {
 		var payload RulePayload
 		if err := yaml.Unmarshal(buf, &payload); err != nil {
 			return nil, err
@@ -343,11 +343,11 @@ func (i *inlineProvider) MarshalJSON() ([]byte, error) {
 		})
 }
 
-func NewInlineProvider(name string, behavior P.RuleBehavior, payload []string, parse common.ParseRuleFunc, domainOnly ...bool) P.RuleProvider {
+func NewInlineProvider(name string, behavior P.RuleBehavior, payload []string, parse common.ParseRuleFunc, blacklistOnly ...bool) P.RuleProvider {
 	ip := &inlineProvider{
 		baseProvider: baseProvider{
 			behavior: behavior,
-			strategy: newStrategy(behavior, parse, domainOnly...),
+			strategy: newStrategy(behavior, parse, blacklistOnly...),
 		},
 		payload:  payload,
 		name:     name,

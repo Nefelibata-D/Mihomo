@@ -66,6 +66,7 @@ type dialSession struct {
 	strategy *Strategy
 	key      string
 	host     string
+	metadata *C.Metadata
 
 	order   []string
 	blocked map[string]struct{}
@@ -91,7 +92,7 @@ type dialSession struct {
 	released   bool
 }
 
-func newDialSession(strategy *Strategy, key, host string) *dialSession {
+func newDialSession(strategy *Strategy, key, host string, metadata *C.Metadata) *dialSession {
 	flow := ""
 	if strategy.diagEnabled() {
 		flow = newDiagFlowID()
@@ -101,7 +102,8 @@ func newDialSession(strategy *Strategy, key, host string) *dialSession {
 		key:      key,
 		host:     host,
 		flow:     flow,
-		blocked:  strategy.blacklistedSet(host),
+		blocked:  strategy.blacklistedSet(metadata),
+		metadata: metadata.Clone(),
 	}
 }
 
@@ -122,7 +124,7 @@ func (s *dialSession) ensureInit(candidates []C.Proxy) error {
 
 	handle, err := s.strategy.cache.Acquire(s.key,
 		func() (string, error) {
-			return s.strategy.chooseFresh(candidates, s.key, s.host, s.flow)
+			return s.strategy.chooseFresh(candidates, s.key, s.metadata, s.flow)
 		},
 		func(name string) bool {
 			proxy, ok := findCandidate(candidates, name)
@@ -400,10 +402,10 @@ func (s *dialSession) release() {
 // state lives in the typed retry context; a direct dial (for example the
 // rematch metadata probe) gets a one-attempt session and cannot silently
 // inherit another connection's position.
-func (s *Strategy) sessionFor(ctx context.Context, key, host string, candidates []C.Proxy) (*dialSession, func(), error) {
+func (s *Strategy) sessionFor(ctx context.Context, key, host string, candidates []C.Proxy, metadata *C.Metadata) (*dialSession, func(), error) {
 	state, inRetry := retrystate.From(ctx)
 	if !inRetry {
-		session := newDialSession(s, key, host)
+		session := newDialSession(s, key, host, metadata)
 		if err := session.ensureInit(candidates); err != nil {
 			session.release()
 			return nil, nil, err
@@ -412,7 +414,7 @@ func (s *Strategy) sessionFor(ctx context.Context, key, host string, candidates 
 	}
 
 	value := state.Value(func() any {
-		return newDialSession(s, key, host)
+		return newDialSession(s, key, host, metadata)
 	})
 	session, ok := value.(*dialSession)
 	if !ok {

@@ -37,6 +37,7 @@ type LoadBalanceOption struct {
 type LoadBalance struct {
 	*GroupBase
 	disableUDP     bool
+	siteBlacklist  *weightedsticky.SiteBlacklistIndex
 	strategyFn     strategyFn
 	strategyStart  func()
 	strategyClose  func()
@@ -371,6 +372,7 @@ func NewLoadBalance(option GroupCommonOption, loadBalanceOption LoadBalanceOptio
 		return nil, fmt.Errorf("%w: %s", errStrategy, loadBalanceOption.Strategy)
 	}
 	return &LoadBalance{
+		siteBlacklist: loadBalanceOption.SiteBlacklist,
 		GroupBase: NewGroupBase(GroupBaseOption{
 			Name:           option.Name,
 			Type:           C.LoadBalance,
@@ -392,3 +394,6 @@ func NewLoadBalance(option GroupCommonOption, loadBalanceOption LoadBalanceOptio
 		expectedStatus: option.ExpectedStatus,
 	}, nil
 }
+
+// NeedsProcessMetadata lets tunnel use its normal process lookup before selection.
+func (lb *LoadBalance) NeedsProcessMetadata() bool { return lb.siteBlacklist.NeedsProcess() }

@@ -10,11 +10,12 @@ import (
 )
 
 type classicalStrategy struct {
-	rules      []C.Rule
-	count      int
-	domainOnly bool
-	err        error
-	parse      common.ParseRuleFunc
+	rules         []C.Rule
+	count         int
+	blacklistOnly bool
+	needsProcess  bool
+	err           error
+	parse         common.ParseRuleFunc
 }
 
 func (c *classicalStrategy) Behavior() P.RuleBehavior {
@@ -39,12 +40,13 @@ func (c *classicalStrategy) Reset() {
 	c.err = nil
 	c.rules = nil
 	c.count = 0
+	c.needsProcess = false
 }
 
 func (c *classicalStrategy) Insert(rule string) {
 	r, err := c.payloadToRule(rule)
 	if err != nil {
-		if c.domainOnly {
+		if c.blacklistOnly {
 			c.err = err
 			return
 		}
@@ -52,19 +54,23 @@ func (c *classicalStrategy) Insert(rule string) {
 	} else {
 		c.rules = append(c.rules, r)
 		c.count++
+		switch r.RuleType() {
+		case C.ProcessName, C.ProcessPath, C.ProcessNameRegex, C.ProcessPathRegex, C.ProcessNameWildcard, C.ProcessPathWildcard:
+			c.needsProcess = true
+		}
 	}
 }
 
 func (c *classicalStrategy) payloadToRule(rule string) (C.Rule, error) {
 	tp, payload, target, params := common.ParseRulePayload(rule, false)
-	if c.domainOnly {
+	if c.blacklistOnly {
 		if payload == "" {
 			return nil, fmt.Errorf("blacklist rule-set requires a non-empty payload: %s", rule)
 		}
 		switch tp {
-		case "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-REGEX", "DOMAIN-WILDCARD":
+		case "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-REGEX", "DOMAIN-WILDCARD", "PROCESS-NAME", "PROCESS-PATH", "PROCESS-NAME-REGEX", "PROCESS-PATH-REGEX", "PROCESS-NAME-WILDCARD", "PROCESS-PATH-WILDCARD":
 		default:
-			return nil, fmt.Errorf("blacklist rule-set only accepts DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, DOMAIN-REGEX and DOMAIN-WILDCARD: %s", rule)
+			return nil, fmt.Errorf("blacklist rule-set only accepts DOMAIN and PROCESS rule families: %s", rule)
 		}
 		if len(params) != 0 {
 			return nil, fmt.Errorf("blacklist rule-set does not accept targets or extra parameters: %s", rule)
@@ -82,3 +88,5 @@ func (c *classicalStrategy) FinishInsert() {}
 func NewClassicalStrategy(parse common.ParseRuleFunc) *classicalStrategy {
 	return &classicalStrategy{rules: []C.Rule{}, parse: parse}
 }
+
+func (c *classicalStrategy) NeedsProcess() bool { return c.needsProcess }
