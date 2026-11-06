@@ -1,7 +1,46 @@
-# Administrator-issued Mihomo subscription template for this fork.
-# Every .invalid address, UUID, REALITY key, domain and node ID below is a
-# placeholder. Replace them with per-user subscription data before delivery.
-# This template can be syntax-checked, but it cannot connect as written.
+# Pass 订阅示例（Mihomo 扩展）
+# 将 .invalid 地址、UUID、REALITY 参数、节点 ID 和健康检查 URL 替换为实际配置。
+# 校验配置：pass -t -f weighted-sticky-subscription.yaml
+#
+# 选路：rules 先决定代理组；只有 strategy: weighted-sticky 使用以下扩展。
+# 权重仅决定新绑定的首次抽选。有效绑定优先复用，连接失败沿用内核的有界重试。
+# 缓存键为入口身份（认证用户名优先，否则源 IP）与网站身份的组合。
+# 网站身份默认使用 PSL eTLD+1；无法求取时使用完整域名，IP 目标按 IP 区分。
+# 可在 weighted-sticky.site-groups 中指定站点组：
+#   - name: example
+#     domains: [login.example.invalid]
+#     domain-suffixes: [example.invalid]
+# 完整匹配优先，其次为最长后缀；域名统一转为小写、IDN ASCII 并移除末尾点。
+#
+# site-blacklist 按当前完整域名匹配，仅影响新绑定，不撤销已有有效绑定。
+# 有未被列入黑名单的获准节点时优先使用；全部被列入时仍允许尝试。
+# 条目可加 group: 默认负载 限定策略组；省略时作用于所有 weighted-sticky 组。
+# rules 支持 DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / DOMAIN-REGEX /
+# DOMAIN-WILDCARD / RULE-SET。正则完整匹配需自行添加 ^ 和 $。
+# 旧 domains / domain-suffixes 黑名单字段不再支持。
+#
+# 引用规则集示例：在条目 rules 中添加 RULE-SET,websites，并配置：
+# rule-providers:
+#   websites:
+#     type: http
+#     behavior: classical
+#     format: yaml
+#     url: https://panel.example.invalid/rulesets/sites.yaml
+#     interval: 3600
+# 也支持 type: file + path，以及 type: inline + payload。
+# yaml 文件使用 payload 列表，text 文件每行一条规则；只接受上述五类域名规则，
+# 不带目标策略或额外参数。路由可以复用同一规则集。
+# 加载与更新使用原生 provider；非法规则使整次更新失败，不发布部分解析结果。
+#
+# resilience.control 查询 GET {base-url}/v1/nodes/{node-id}/status，
+# 使用 Authorization: Bearer {uuid}。200=normal，409=grace，403=disabled。
+# normal 允许新绑定；grace 仅允许已有绑定；disabled 禁用并清除该节点绑定。
+# 查询失败保持最近明确状态；未知状态不准入。健康检查不改变账户状态。
+# 所有参与组的节点都需 node-ids 映射，无额度限制的节点由管理端返回 normal。
+# 普通 select 组及其他负载策略不读取 site-blacklist 或账户准入配置。
+#
+# beta 版额外写入配置目录 diagnostics/weighted-sticky/*.ndjson，记录选路、
+# 状态变化和失败事件。日志包含站点信息；普通版不生成该诊断文件。
 
 mixed-port: 7890
 allow-lan: false
@@ -38,15 +77,18 @@ proxies:
       public-key: ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0A
       short-id: "00000000"
 
-# Shared by all groups that explicitly enable weighted-sticky. This only
-# influences new bindings; a valid cache binding is tried first.
+# 新绑定的网站黑名单。
 site-blacklist:
   - proxy: 日本出口
-    domains: [sensitive.example.invalid]
-    domain-suffixes: [media.example.invalid]
+    rules:
+      - DOMAIN,sensitive.example.invalid
+      - DOMAIN-SUFFIX,media.example.invalid
+      - DOMAIN-KEYWORD,stream
+      - 'DOMAIN-REGEX,^video[0-9]+\.example\.invalid$'
+      - DOMAIN-WILDCARD,*.cdn.example.invalid
 
 proxy-groups:
-  # One-node routes need no load balancing. The US node has no JP quota.
+  # 单节点路由。
   - name: 美国单节点
     type: select
     proxies: [美国出口]
@@ -79,6 +121,6 @@ proxy-groups:
             美国出口: us
 
 rules:
-  # Replace with the domains that should use the single-node group.
+  # 需要固定出口的网站。
   - DOMAIN-SUFFIX,us-only.example.invalid,美国单节点
   - MATCH,默认负载

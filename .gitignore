@@ -16,6 +16,7 @@ test
 
 # go mod vendor
 vendor
+mod
 
 # GoLand
 .idea/*

@@ -25,7 +25,7 @@ type ruleProviderSchema struct {
 	PathInBundle string              `provider:"path-in-bundle,omitempty"`
 }
 
-func ParseRuleProvider(name string, mapping map[string]any, parse common.ParseRuleFunc, makeBundleFile func(pathInBundle string) resource.BundleFile) (P.RuleProvider, error) {
+func ParseRuleProvider(name string, mapping map[string]any, parse common.ParseRuleFunc, makeBundleFile func(pathInBundle string) resource.BundleFile, domainOnly ...bool) (P.RuleProvider, error) {
 	schema := &ruleProviderSchema{}
 	decoder := structure.NewDecoder(structure.Option{TagName: "provider", WeaklyTypedInput: true})
 	if err := decoder.Decode(mapping, schema); err != nil {
@@ -40,6 +40,18 @@ func ParseRuleProvider(name string, mapping map[string]any, parse common.ParseRu
 		return nil, err
 	}
 
+	strict := len(domainOnly) > 0 && domainOnly[0]
+	if strict && (behavior != P.Classical || format == P.MrsRule) {
+		return nil, fmt.Errorf("blacklist rule-set %s requires classical yaml or text", name)
+	}
+	if strict {
+		strategy := NewClassicalStrategy(parse)
+		strategy.domainOnly = true
+		rulesParseInline(schema.Payload, strategy)
+		if strategy.err != nil {
+			return nil, strategy.err
+		}
+	}
 	var vehicle P.Vehicle
 	switch schema.Type {
 	case "file":
@@ -58,12 +70,12 @@ func ParseRuleProvider(name string, mapping map[string]any, parse common.ParseRu
 		}
 		vehicle = resource.NewHTTPVehicle(schema.URL, path, schema.Proxy, schema.Header, resource.DefaultHttpTimeout, schema.SizeLimit)
 	case "inline":
-		return NewInlineProvider(name, behavior, schema.Payload, parse), nil
+		return NewInlineProvider(name, behavior, schema.Payload, parse, strict), nil
 	default:
 		return nil, fmt.Errorf("unsupported vehicle type: %s", schema.Type)
 	}
 
 	interval := time.Duration(uint(schema.Interval)) * time.Second
 
-	return NewRuleSetProvider(name, behavior, format, interval, vehicle, schema.Payload, makeBundleFile(schema.PathInBundle), parse), nil
+	return NewRuleSetProvider(name, behavior, format, interval, vehicle, schema.Payload, makeBundleFile(schema.PathInBundle), parse, strict), nil
 }

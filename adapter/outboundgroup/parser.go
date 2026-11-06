@@ -221,7 +221,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 				opt.WeightedSticky = map[string]any{}
 			}
 		}
-		opt.SiteBlacklist = siteBlacklist
+		opt.SiteBlacklist = siteBlacklist.ForGroup(groupName)
 		return NewLoadBalance(groupOption, opt, emptyFallback, providers)
 	case "relay":
 		return nil, fmt.Errorf("%w: The group [%s] with relay type was removed, please using dialer-proxy instead", errType, groupName)

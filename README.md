@@ -34,7 +34,7 @@
 
 A web dashboard with first-class support for this project has been created; it can be checked out at [metacubexd](https://github.com/MetaCubeX/metacubexd).
 
-## Configration example
+## Configuration example
 
 Configuration example is located at [/docs/config.yaml](https://github.com/MetaCubeX/mihomo/blob/Alpha/docs/config.yaml).
 
@@ -44,7 +44,11 @@ Documentation can be found in [mihomo Docs](https://wiki.metacubex.one/).
 
 ## Project extensions
 
-This fork's routing and weighted-sticky extension documentation is at [docs/extensions/README.md](docs/extensions/README.md).
+This fork adds weighted-sticky routing, per-account node admission and site-based exclusions. Configuration and field descriptions are included in the [subscription example](docs/extensions/weighted-sticky-subscription.yaml).
+
+Releases include Linux and Windows x86-64 binaries (AMD64 v1), each in standard and beta builds. Beta builds add routing diagnostics under `diagnostics/weighted-sticky/` in the configuration directory; the logs include site information.
+
+The **Release** workflow is started manually and reads the latest official release number automatically: `vX.Y.Z-plus`, with `vX.Y.Z-plus-beta` for diagnostic binaries. This sets the release version; upstream source updates must be merged separately. Pushes and pull requests run checks only. Docker publishing and downstream repository notifications are disabled.
 
 ## For development
 

@@ -229,14 +229,7 @@ func (c *Cache) Ref(binding *Binding) *Handle {
 }
 
 func (c *Cache) Commit(b *Binding) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	now := c.now()
-	if !c.isCurrentLocked(b) || c.expired(b, now) {
-		return
-	}
-	b.committed = true
-	b.lastActivity = now
+	c.Renew(b)
 }
 
 // renew slides the idle window. It also commits a reservation whose dial

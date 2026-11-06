@@ -137,7 +137,7 @@ func TestValidateDialerProxies(t *testing.T) {
 			config := RawConfig{Proxy: testCase.proxy}
 			// repeat so that different map iteration orders are covered
 			for i := 0; i < 20; i++ {
-				_, _, err := parseProxies(&config)
+				_, _, err := parseProxies(&config, nil, nil)
 				if testCase.errs == nil {
 					assert.NoError(t, err)
 				} else if assert.Error(t, err) {

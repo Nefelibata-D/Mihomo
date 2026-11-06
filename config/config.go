@@ -677,7 +677,22 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 	}
 	config.TLS = tlsCfg
 
-	proxies, providers, err := parseProxies(rawCfg)
+	blacklistEntries, siteBlacklist, err := weightedsticky.ParseSiteBlacklist(rawCfg.SiteBlacklist)
+	if err != nil {
+		return nil, err
+	}
+	log.Infoln("Geodata Loader mode: %s", geodata.LoaderName())
+	log.Infoln("Geosite Matcher implementation: %s", geodata.SiteMatcherName())
+	ruleProviders, err := parseRuleProviders(rawCfg, siteBlacklist.ProviderNames())
+	if err != nil {
+		return nil, err
+	}
+	config.RuleProviders = ruleProviders
+
+	if err := siteBlacklist.BindProviders(ruleProviders); err != nil {
+		return nil, err
+	}
+	proxies, providers, err := parseProxies(rawCfg, blacklistEntries, siteBlacklist)
 	if err != nil {
 		return nil, err
 	}
@@ -689,14 +704,6 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 		return nil, err
 	}
 	config.Listeners = listeners
-
-	log.Infoln("Geodata Loader mode: %s", geodata.LoaderName())
-	log.Infoln("Geosite Matcher implementation: %s", geodata.SiteMatcherName())
-	ruleProviders, err := parseRuleProviders(rawCfg)
-	if err != nil {
-		return nil, err
-	}
-	config.RuleProviders = ruleProviders
 
 	subRules, err := parseSubRules(rawCfg, proxies, ruleProviders)
 	if err != nil {
@@ -879,7 +886,7 @@ func parseTLS(cfg *RawConfig) (*TLS, error) {
 	}, nil
 }
 
-func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[string]P.ProxyProvider, err error) {
+func parseProxies(cfg *RawConfig, blacklistEntries []weightedsticky.SiteBlacklistEntry, siteBlacklist *weightedsticky.SiteBlacklistIndex) (proxies map[string]C.Proxy, providersMap map[string]P.ProxyProvider, err error) {
 	proxies = make(map[string]C.Proxy)
 	// Group construction is side-effect free: weighted-sticky strategies start
 	// their status tasks only at the activation point
@@ -955,10 +962,6 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 	slices.Sort(AllProxies)
 	slices.Sort(AllProviders)
 
-	blacklistEntries, siteBlacklist, err := weightedsticky.ParseSiteBlacklist(cfg.SiteBlacklist)
-	if err != nil {
-		return nil, nil, err
-	}
 	if len(blacklistEntries) > 0 {
 		known := make(map[string]struct{}, len(proxies))
 		for name := range proxies {
@@ -974,6 +977,18 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 			}
 		}
 		for i, entry := range blacklistEntries {
+			if entry.Group != "" {
+				valid := false
+				for _, group := range groupsConfig {
+					if group["name"] == entry.Group && group["type"] == "load-balance" && group["strategy"] == "weighted-sticky" {
+						valid = true
+						break
+					}
+				}
+				if !valid {
+					return nil, nil, fmt.Errorf("site-blacklist[%d] references unknown weighted-sticky group %q", i, entry.Group)
+				}
+			}
 			if _, ok := known[entry.Proxy]; !ok && !dynamic {
 				return nil, nil, fmt.Errorf("site-blacklist[%d] references unknown proxy %q", i, entry.Proxy)
 			}
@@ -1048,12 +1063,12 @@ func parseListeners(cfg *RawConfig) (listeners map[string]C.InboundListener, err
 	return
 }
 
-func parseRuleProviders(cfg *RawConfig) (ruleProviders map[string]P.RuleProvider, err error) {
+func parseRuleProviders(cfg *RawConfig, blacklistProviders map[string]bool) (ruleProviders map[string]P.RuleProvider, err error) {
 	RP.SetTunnel(T.Tunnel)
 	ruleProviders = map[string]P.RuleProvider{}
 	// parse rule provider
 	for name, mapping := range cfg.RuleProvider {
-		rp, err := RP.ParseRuleProvider(name, mapping, R.ParseRule, RB.MakeBundleFile)
+		rp, err := RP.ParseRuleProvider(name, mapping, R.ParseRule, RB.MakeBundleFile, blacklistProviders[name])
 		if err != nil {
 			return nil, err
 		}

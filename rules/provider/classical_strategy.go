@@ -10,9 +10,11 @@ import (
 )
 
 type classicalStrategy struct {
-	rules []C.Rule
-	count int
-	parse common.ParseRuleFunc
+	rules      []C.Rule
+	count      int
+	domainOnly bool
+	err        error
+	parse      common.ParseRuleFunc
 }
 
 func (c *classicalStrategy) Behavior() P.RuleBehavior {
@@ -34,6 +36,7 @@ func (c *classicalStrategy) Count() int {
 }
 
 func (c *classicalStrategy) Reset() {
+	c.err = nil
 	c.rules = nil
 	c.count = 0
 }
@@ -41,6 +44,10 @@ func (c *classicalStrategy) Reset() {
 func (c *classicalStrategy) Insert(rule string) {
 	r, err := c.payloadToRule(rule)
 	if err != nil {
+		if c.domainOnly {
+			c.err = err
+			return
+		}
 		log.Warnln("parse classical rule [%s] error: %s", rule, err.Error())
 	} else {
 		c.rules = append(c.rules, r)
@@ -50,6 +57,19 @@ func (c *classicalStrategy) Insert(rule string) {
 
 func (c *classicalStrategy) payloadToRule(rule string) (C.Rule, error) {
 	tp, payload, target, params := common.ParseRulePayload(rule, false)
+	if c.domainOnly {
+		if payload == "" {
+			return nil, fmt.Errorf("blacklist rule-set requires a non-empty payload: %s", rule)
+		}
+		switch tp {
+		case "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-REGEX", "DOMAIN-WILDCARD":
+		default:
+			return nil, fmt.Errorf("blacklist rule-set only accepts DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, DOMAIN-REGEX and DOMAIN-WILDCARD: %s", rule)
+		}
+		if len(params) != 0 {
+			return nil, fmt.Errorf("blacklist rule-set does not accept targets or extra parameters: %s", rule)
+		}
+	}
 	switch tp {
 	case "MATCH", "RULE-SET", "SUB-RULE":
 		return nil, fmt.Errorf("unsupported rule type on classical rule-set: %s", tp)

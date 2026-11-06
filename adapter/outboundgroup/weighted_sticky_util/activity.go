@@ -192,13 +192,8 @@ func (c *wsConn) UnwrapReader() (io.Reader, []N.CountFunc) {
 	}
 	// The resilience path must observe the first read error even when sing's
 	// copy uses the unwrapped reader or the splice path. A plain wrapper keeps
-	// that error visible; the count callback keeps activity renewal working.
-	return &hookedReader{reader: c.Conn, conn: c}, []N.CountFunc{func(n int64) {
-		if n > 0 {
-			c.markGotData()
-			c.handle.Renew()
-		}
-	}}
+	// that error visible and renews activity through Read/Write.
+	return &hookedReader{conn: c}, nil
 }
 
 func (c *wsConn) UnwrapWriter() (io.Writer, []N.CountFunc) {
@@ -209,51 +204,23 @@ func (c *wsConn) UnwrapWriter() (io.Writer, []N.CountFunc) {
 			}
 		}}
 	}
-	return &hookedWriter{writer: c.Conn, conn: c}, []N.CountFunc{func(n int64) {
-		if n > 0 {
-			c.markWrote()
-			c.handle.Renew()
-		}
-	}}
+	return &hookedWriter{conn: c}, nil
 }
 
 type hookedReader struct {
-	reader io.Reader
-	conn   *wsConn
+	conn *wsConn
 }
 
 func (r *hookedReader) Read(p []byte) (int, error) {
-	n, err := r.reader.Read(p)
-	if n > 0 {
-		r.conn.markGotData()
-		r.conn.handle.Renew()
-	} else if err != nil {
-		r.conn.noteReadFailure(err)
-	}
-	return n, err
+	return r.conn.Read(p)
 }
 
 type hookedWriter struct {
-	writer io.Writer
-	conn   *wsConn
+	conn *wsConn
 }
 
 func (w *hookedWriter) Write(p []byte) (int, error) {
-	first := w.conn.isFirstWrite()
-	n, err := w.writer.Write(p)
-	if n > 0 {
-		w.conn.markWrote()
-		w.conn.handle.Renew()
-		if first && err != nil {
-			if w.conn.onFailure != nil && !w.conn.localCancel(err) {
-				w.conn.failureOnce.Do(func() { w.conn.onFailure(failureFirstWrite, err) })
-			}
-			return n, &unsafeReplayError{err: err}
-		}
-	} else if err != nil {
-		w.conn.noteWriteFailure(err)
-	}
-	return n, err
+	return w.conn.Write(p)
 }
 
 // NeedHandshake preserves the early-connection contract of the wrapped conn.
