@@ -48,7 +48,7 @@ This fork adds weighted-sticky routing, per-account node admission and site-base
 
 Releases include Linux and Windows x86-64 binaries (AMD64 v1), each in standard and beta builds. Beta builds add routing diagnostics under `diagnostics/weighted-sticky/` in the configuration directory; the logs include site information.
 
-The **Release** workflow is started manually and reads the latest official release number automatically: `vX.Y.Z-plus`, with `vX.Y.Z-plus-beta` for diagnostic binaries. This sets the release version; upstream source updates must be merged separately. Pushes and pull requests run checks only. Docker publishing and downstream repository notifications are disabled.
+The **Release** workflow runs when a four-part version tag is pushed: `vX.Y.Z.N` (for example, `v1.19.33.1`). `X.Y.Z` must identify an official upstream stable release matching the incorporated upstream source; the workflow verifies that release exists but does not merge upstream code. Our revision `N` starts at `1`, increases for each custom release, and restarts at `1` when the upstream base changes. Diagnostic binaries use `vX.Y.Z.N-beta` within the same release. Publish by tagging the intended commit and pushing that tag; ordinary branch pushes and pull requests run checks only. Docker publishing and downstream repository notifications are disabled.
 
 ## For development
 

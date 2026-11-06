@@ -1,7 +1,9 @@
 name: Release
 
 on:
-  workflow_dispatch:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
   contents: read
@@ -30,13 +32,21 @@ jobs:
         with:
           go-download-base-url: https://github.com/MetaCubeX/go/releases/download/build
           go-version: '1.26'
-      - name: Resolve upstream version
+      - name: Validate release version
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          upstream=$(gh api repos/MetaCubeX/mihomo/releases/latest --jq .tag_name)
-          [[ "$upstream" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          echo "VERSION=${upstream}-plus" >> "$GITHUB_ENV"
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.([1-9][0-9]*)$ ]]; then
+            echo "Expected vMAJOR.MINOR.PATCH.REVISION with REVISION >= 1" >&2
+            exit 1
+          fi
+          upstream="${RELEASE_TAG%.*}"
+          gh api "repos/MetaCubeX/mihomo/releases/tags/$upstream" \
+            --jq 'select(.draft == false and .prerelease == false) | .tag_name' > upstream-version.txt
+          [[ "$(cat upstream-version.txt)" == "$upstream" ]]
+          echo "VERSION=$RELEASE_TAG" >> "$GITHUB_ENV"
           echo "BUILDTIME=$(date -u +%FT%TZ)" >> "$GITHUB_ENV"
       - name: Test
         run: |
@@ -89,4 +99,4 @@ jobs:
           订阅配置参见 docs/extensions/weighted-sticky-subscription.yaml。
           NOTES
           gh release create "$VERSION" dist/* --repo "$REPOSITORY" --target "$COMMIT" \
-            --title "$VERSION" --notes-file release-notes.md --fail-on-no-commits
+            --title "$VERSION" --notes-file release-notes.md --verify-tag
