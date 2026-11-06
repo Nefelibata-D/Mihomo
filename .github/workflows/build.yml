@@ -42,6 +42,11 @@ jobs:
             echo "Expected vMAJOR.MINOR.PATCH.REVISION with REVISION >= 1" >&2
             exit 1
           fi
+          source_version=$(sed -n 's/^[[:space:]]*Version[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' constant/version.go)
+          if [[ "$source_version" != "$RELEASE_TAG" ]]; then
+            echo "Tag $RELEASE_TAG does not match source version $source_version" >&2
+            exit 1
+          fi
           upstream="${RELEASE_TAG%.*}"
           gh api "repos/MetaCubeX/mihomo/releases/tags/$upstream" \
             --jq 'select(.draft == false and .prerelease == false) | .tag_name' > upstream-version.txt

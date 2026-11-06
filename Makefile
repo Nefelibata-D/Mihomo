@@ -1,17 +1,7 @@
 NAME=mihomo
 BINDIR=bin
-BRANCH=$(shell git branch --show-current)
 TAGS=with_gvisor
-ifeq ($(BRANCH),Alpha)
-VERSION=alpha-$(shell git rev-parse --short HEAD)
-else ifeq ($(BRANCH),Beta)
-VERSION=beta-$(shell git rev-parse --short HEAD)
-TAGS=with_gvisor beta_diag
-else ifeq ($(BRANCH),)
-VERSION=$(shell git describe --tags)
-else
-VERSION=$(shell git rev-parse --short HEAD)
-endif
+VERSION=$(shell sed -n 's/^[[:space:]]*Version[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' constant/version.go)
 
 BUILDTIME=$(shell date -u)
 GOBUILD=CGO_ENABLED=0 go build -tags '$(TAGS)' -trimpath -ldflags '-X "github.com/metacubex/mihomo/constant.Version=$(VERSION)" \
