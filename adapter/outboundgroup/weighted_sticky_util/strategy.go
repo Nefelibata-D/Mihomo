@@ -14,7 +14,6 @@ import (
 	"github.com/metacubex/mihomo/common/utils"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
-	"github.com/metacubex/mihomo/log"
 )
 
 var (
@@ -25,23 +24,20 @@ var (
 	// ErrDuplicateCandidateName rejects two distinct adapters sharing one name;
 	// the binding stores names, so such a pair cannot be represented.
 	ErrDuplicateCandidateName = errors.New("weighted-sticky: duplicate candidate name")
-
-	// ErrNodeNotApproved reports that a successful dial finished after the node
-	// stopped being approved for this connection. The connection must not be
-	// published as a shared binding or treated as admitted.
-	ErrNodeNotApproved = errors.New("weighted-sticky: node is no longer approved")
 )
 
 // StrategyOptions configures a Strategy. Now, RandIntn and Alive exist so tests
 // can use a virtual clock, deterministic draws and a deterministic official
 // health source; nil means the production implementation.
 type StrategyOptions struct {
-	Name     string
-	Config   *Options
-	TestURL  string
-	Now      func() time.Time
-	RandIntn func(int) int
-	Alive    func(C.Proxy) bool
+	Name       string
+	Config     *Options
+	TestURL    string
+	Now        func() time.Time
+	RandIntn   func(int) int
+	Alive      func(C.Proxy) bool
+	Candidates func() []C.Proxy
+	Providers  []P.ProxyProvider
 
 	// Clock and Checker are injection points for deterministic tests.
 	// Production leaves them nil and uses the real clock and control client.
@@ -62,10 +58,14 @@ type Strategy struct {
 	diag         diagEmitter
 	diagInstance string
 
-	policy    *PolicyStore
-	validator *Validator
-	nodeIDs   map[string]string
-	byNode    map[string][]string
+	policy            *PolicyStore
+	validator         *Validator
+	nodeIDs           map[string]string
+	byNode            map[string][]string
+	testURL           string
+	candidates        func() []C.Proxy
+	providers         []P.ProxyProvider
+	healthUnsubscribe []func()
 
 	mu        sync.Mutex
 	started   bool
@@ -74,7 +74,7 @@ type Strategy struct {
 
 	// reconcileMu guards the last observed candidate list. Reconciliation is
 	// only needed when a provider adds, removes or replaces a candidate; the
-	// list is at most 32 entries by design.
+	// server count is bounded; a server may have several proxies.
 	reconcileMu    sync.Mutex
 	lastCandidates []C.Proxy
 }
@@ -107,11 +107,21 @@ func NewStrategy(options StrategyOptions) (*Strategy, error) {
 		diagInstance: newDiagInstanceID(),
 	}
 
+	strategy.testURL = options.TestURL
+	strategy.candidates = options.Candidates
+	strategy.providers = options.Providers
+	strategy.nodeIDs = map[string]string{}
+	strategy.byNode = map[string][]string{}
+	for _, node := range options.Config.Nodes {
+		strategy.byNode[node.ID] = append([]string(nil), node.Proxies...)
+		for _, name := range node.Proxies {
+			strategy.nodeIDs[name] = node.ID
+		}
+	}
+
 	resilience := options.Config.Resilience
 	if resilience == nil {
-		// Without a management block there is no account admission. The
-		// subscription blacklist, official retry loop, and health ordering
-		// still apply.
+		// Quota observation is optional; server scheduling is independent of it.
 		return strategy, nil
 	}
 
@@ -133,11 +143,6 @@ func NewStrategy(options StrategyOptions) (*Strategy, error) {
 	}
 
 	strategy.policy = NewPolicyStore()
-	strategy.nodeIDs = resilience.Control.NodeIDs
-	strategy.byNode = map[string][]string{}
-	for name, node := range strategy.nodeIDs {
-		strategy.byNode[node] = append(strategy.byNode[node], name)
-	}
 
 	nodes := make([]string, 0, len(strategy.byNode))
 	for node := range strategy.byNode {
@@ -151,12 +156,6 @@ func NewStrategy(options StrategyOptions) (*Strategy, error) {
 		GraceInterval: resilience.Control.GraceInterval,
 		Clock:         clock,
 		OnStatusChange: func(nodeID string, from, to AccountStatus) {
-			if to == AccountStatusDisabled {
-				for _, proxyName := range strategy.byNode[nodeID] {
-					strategy.cache.InvalidateNode(proxyName)
-				}
-				log.Debugln("weighted-sticky [%s]: node %s for this account is disabled; bindings invalidated", strategy.name, nodeID)
-			}
 			if strategy.diagEnabled() {
 				strategy.diagEmit("status.change", "", map[string]any{
 					"node_id": nodeID,
@@ -184,6 +183,11 @@ func (s *Strategy) Start() {
 	s.started = true
 	s.diag.Register(s.diagInstance, s.name, s.diagConfig())
 	validator := s.validator
+	for _, provider := range s.providers {
+		if observer, ok := provider.(healthObserver); ok {
+			s.healthUnsubscribe = append(s.healthUnsubscribe, observer.ObserveHealthCheck(s.ObserveHealth))
+		}
+	}
 	s.mu.Unlock()
 	if validator != nil {
 		validator.Start()
@@ -195,8 +199,13 @@ func (s *Strategy) Start() {
 func (s *Strategy) Close() {
 	s.mu.Lock()
 	s.closed = true
+	unsubscribe := s.healthUnsubscribe
+	s.healthUnsubscribe = nil
 	started := s.started
 	s.mu.Unlock()
+	for _, stop := range unsubscribe {
+		stop()
+	}
 	s.closeOnce.Do(func() {
 		if s.validator != nil {
 			s.validator.Close()
@@ -212,7 +221,7 @@ func (s *Strategy) Close() {
 // unavailableProxy whose dial fails; this strategy never returns nil and never
 // falls back to the first candidate or DIRECT.
 func (s *Strategy) SelectProxy(proxies []C.Proxy, metadata *C.Metadata, touch bool) C.Proxy {
-	candidates, err := buildWeightedCandidates(proxies)
+	candidates, err := s.validateCandidates(proxies)
 	if err != nil {
 		return s.unavailable(err)
 	}
@@ -243,7 +252,7 @@ func (s *Strategy) SelectProxy(proxies []C.Proxy, metadata *C.Metadata, touch bo
 	if _, unavailable := preview.(*unavailableProxy); unavailable {
 		if touch && s.diagEnabled() {
 			s.diagEmit("selection.blocked", "", map[string]any{
-				"reason":         "no_admitted_candidate",
+				"reason":         "no_candidate",
 				"candidates":     diagCandidateNames(candidates),
 				"blacklist_hits": diagBlacklistHits(candidates, s.blacklistedSet(metadata)),
 			})
@@ -257,6 +266,19 @@ func (s *Strategy) SelectProxy(proxies []C.Proxy, metadata *C.Metadata, touch bo
 		host:       host,
 		candidates: candidates,
 	}
+}
+
+func (s *Strategy) validateCandidates(proxies []C.Proxy) ([]C.Proxy, error) {
+	candidates, err := buildWeightedCandidates(proxies)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range candidates {
+		if s.nodeID(p) == "" {
+			return nil, fmt.Errorf("weighted-sticky nodes missing runtime proxy %q", p.Name())
+		}
+	}
+	return candidates, nil
 }
 
 // bindingKey resolves the website cache key and the request host used by the
@@ -278,139 +300,39 @@ func (s *Strategy) bindingKey(metadata *C.Metadata) (key, host string, err error
 // type inspection. It neither creates nor renews a binding.
 func (s *Strategy) preview(candidates []C.Proxy, key string, metadata *C.Metadata) C.Proxy {
 	if name, ok := s.cache.Lookup(key); ok {
-		if proxy, found := findCandidate(candidates, name); found && s.bindingUsable(proxy) {
-			return proxy
+		if p, found := findCandidate(candidates, name); found {
+			return p
 		}
 	}
-
-	scoped := s.newScopedCandidates(candidates, metadata)
-	for _, proxy := range scoped {
-		if s.alive(proxy) {
-			return proxy
-		}
+	pool := s.newScopedCandidates(candidates, metadata)
+	if len(pool) > 0 {
+		return pool[0]
 	}
-	if len(scoped) > 0 {
-		return scoped[0]
+	if len(candidates) > 0 {
+		return candidates[0]
 	}
 	return s.unavailable(ErrNoAvailableCandidates)
 }
 
-// chooseFresh chooses the first node of a new binding. Weight only affects this
-// one draw. Official health orders the draw: healthy candidates are preferred
-// when any exist, but when every record says unhealthy the strategy still
-// chooses among the admitted candidates and lets the actual dial decide.
-func (s *Strategy) chooseFresh(candidates []C.Proxy, key string, metadata *C.Metadata, flow string) (string, error) {
-	diagOn := s.diagEnabled()
-	var blocked map[string]struct{}
-	if diagOn {
-		blocked = s.blacklistedSet(metadata)
+func (s *Strategy) chooseFresh(candidates, pool []C.Proxy, key string, flow string) (string, error) {
+	// No healthy proxy: reserve the stable second-round starting point without a weighted draw.
+	if len(pool) == 0 {
+		return candidates[0].Name(), nil
 	}
-
-	scoped := s.newScopedCandidates(candidates, metadata)
-	if len(scoped) == 0 {
-		if diagOn {
-			s.diagEmit("selection.blocked", flow, map[string]any{
-				"reason":         "no_admitted_candidate",
-				"candidates":     diagCandidateNames(candidates),
-				"blacklist_hits": diagBlacklistHits(candidates, blocked),
-			})
-		}
-		return "", ErrNoAvailableCandidates
-	}
-
-	pool := scoped
-	healthy := make([]C.Proxy, 0, len(scoped))
-	for _, proxy := range scoped {
-		if s.alive(proxy) {
-			healthy = append(healthy, proxy)
-		}
-	}
-	if len(healthy) > 0 {
-		pool = healthy
-	}
-
-	if log.Level() <= log.DEBUG {
-		names := make([]string, 0, len(pool))
-		for _, proxy := range pool {
-			names = append(names, proxy.Name())
-		}
-		log.Debugln("weighted-sticky [%s]: fresh candidate pool %v", s.name, names)
-	}
-
-	selected, err := SelectCandidate(pool, s.config.Weights, s.config.DefaultWeight, s.randIntn)
+	selected, err := SelectServer(pool, s.config.Nodes, s.randIntn)
 	if err != nil {
-		if diagOn {
-			s.diagEmit("selection.blocked", flow, map[string]any{
-				"reason":         "draw_failed",
-				"error_class":    diagDrawErrorClass(err),
-				"candidates":     diagCandidateNames(candidates),
-				"blacklist_hits": diagBlacklistHits(candidates, blocked),
-			})
-		}
 		return "", err
 	}
-
-	if diagOn {
-		healthMode := "all_unhealthy"
-		if len(healthy) == len(scoped) {
-			healthMode = "all_healthy"
-		} else if len(healthy) > 0 {
-			healthMode = "healthy_only"
-		}
-		poolWeights, total := s.diagPool(pool)
-		blacklistFallback := false
-		for _, proxy := range scoped {
-			if _, ok := blocked[proxy.Name()]; ok {
-				blacklistFallback = true
-				break
-			}
-		}
+	if s.diagEnabled() {
 		siteType, site := diagSite(key)
-		s.diagEmit("selection.draw", flow, map[string]any{
-			"binding":            s.diagKeyID(key),
-			"site_type":          siteType,
-			"site":               site,
-			"pool":               poolWeights,
-			"total_weight":       total,
-			"selected":           selected.Name(),
-			"health_mode":        healthMode,
-			"blacklist_hits":     diagBlacklistHits(candidates, blocked),
-			"blacklist_fallback": blacklistFallback,
-		})
+		s.diagEmit("selection.draw", flow, map[string]any{"binding": s.diagKeyID(key), "server_id": s.nodeID(selected), "selected": selected.Name(), "site_type": siteType, "site": site})
 		s.diagAddCount(selected.Name(), diagMetricDraw, 1)
 	}
 	return selected.Name(), nil
 }
 
-// newScopedCandidates applies account admission and the site-blacklist rule.
-// Only positive-weight nodes that may receive a new binding are considered.
-// Blacklisted nodes enter the candidate set only when no non-blacklisted
-// admitted node exists.
 func (s *Strategy) newScopedCandidates(candidates []C.Proxy, metadata *C.Metadata) []C.Proxy {
-	admitted := make([]C.Proxy, 0, len(candidates))
-	for _, proxy := range candidates {
-		if s.newBindingEligible(proxy) {
-			admitted = append(admitted, proxy)
-		}
-	}
-	if len(admitted) == 0 {
-		return nil
-	}
-
-	blocked := s.blacklistedSet(metadata)
-	if len(blocked) == 0 {
-		return admitted
-	}
-	nonBlocked := make([]C.Proxy, 0, len(admitted))
-	for _, proxy := range admitted {
-		if _, excluded := blocked[proxy.Name()]; !excluded {
-			nonBlocked = append(nonBlocked, proxy)
-		}
-	}
-	if len(nonBlocked) > 0 {
-		return nonBlocked
-	}
-	return admitted
+	return preferNonBlacklisted(s.healthyCandidates(candidates), s.blacklistedSet(metadata))
 }
 
 func (s *Strategy) blacklistedSet(metadata *C.Metadata) map[string]struct{} {
@@ -420,50 +342,15 @@ func (s *Strategy) blacklistedSet(metadata *C.Metadata) map[string]struct{} {
 	return s.config.Blacklist.Match(metadata)
 }
 
-// bindingUsable decides whether an existing cached binding may serve a new
-// connection. Health and the site-blacklist never invalidate a binding:
-// stickiness wins until the account is explicitly disabled or the idle window
-// expires.
-func (s *Strategy) bindingUsable(proxy C.Proxy) bool {
-	return s.existingBindingEligible(proxy)
-}
-
-func (s *Strategy) newBindingEligible(proxy C.Proxy) bool {
-	if proxy == nil || s.weightOf(proxy) <= 0 {
-		return false
+// A missing proxy can retain server affinity while that server still has group members.
+func (s *Strategy) bindingUsable(name string, candidates []C.Proxy) bool {
+	id := s.nodeIDs[name]
+	for _, p := range candidates {
+		if s.nodeID(p) == id && id != "" {
+			return true
+		}
 	}
-	return s.nodeAdmitsNew(proxy)
-}
-
-func (s *Strategy) existingBindingEligible(proxy C.Proxy) bool {
-	if proxy == nil {
-		return false
-	}
-	return s.nodeAdmitsExisting(proxy)
-}
-
-func (s *Strategy) nodeAdmitsNew(proxy C.Proxy) bool {
-	if proxy == nil {
-		return false
-	}
-	if s.policy == nil {
-		// Without a management block every candidate is admitted by the
-		// subscription itself; the server remains the final authority.
-		return true
-	}
-	nodeID := s.nodeID(proxy)
-	return nodeID != "" && s.policy.AllowsNewBinding(nodeID)
-}
-
-func (s *Strategy) nodeAdmitsExisting(proxy C.Proxy) bool {
-	if proxy == nil {
-		return false
-	}
-	if s.policy == nil {
-		return true
-	}
-	nodeID := s.nodeID(proxy)
-	return nodeID != "" && s.policy.AllowsExistingBinding(nodeID)
+	return false
 }
 
 func (s *Strategy) nodeID(proxy C.Proxy) string {
@@ -475,7 +362,7 @@ func (s *Strategy) nodeID(proxy C.Proxy) string {
 
 // reconcileCandidates drops binding records for nodes the provider removed.
 // It runs only when the candidate list actually changed, so the normal dial
-// path pays only a length/identity comparison over at most 32 entries.
+// path pays only a length/identity comparison over the group members.
 func (s *Strategy) reconcileCandidates(candidates []C.Proxy) {
 	if len(candidates) == 0 {
 		return
@@ -490,7 +377,9 @@ func (s *Strategy) reconcileCandidates(candidates []C.Proxy) {
 
 	keep := make(map[string]struct{}, len(candidates))
 	for _, proxy := range candidates {
-		keep[proxy.Name()] = struct{}{}
+		for _, name := range s.byNode[s.nodeID(proxy)] {
+			keep[name] = struct{}{}
+		}
 	}
 	s.cache.PruneProxies(keep)
 }
@@ -505,13 +394,6 @@ func sameCandidateSnapshot(a, b []C.Proxy) bool {
 		}
 	}
 	return true
-}
-
-func (s *Strategy) weightOf(proxy C.Proxy) int {
-	if weight, ok := s.config.Weights[proxy.Name()]; ok {
-		return weight
-	}
-	return s.config.DefaultWeight
 }
 
 func (s *Strategy) unavailable(err error) C.Proxy {
@@ -567,10 +449,7 @@ func StaticCandidateNames(providers []P.ProxyProvider) ([]string, bool, error) {
 			if isProxyGroupType(proxy.Type()) {
 				return nil, false, fmt.Errorf("%w: %q", ErrNestedProxyGroup, proxy.Name())
 			}
-			if existing, ok := seen[proxy.Name()]; ok {
-				if sameProxyObject(existing, proxy) {
-					continue
-				}
+			if _, ok := seen[proxy.Name()]; ok {
 				return nil, false, fmt.Errorf("%w: %q", ErrDuplicateCandidateName, proxy.Name())
 			}
 			seen[proxy.Name()] = proxy

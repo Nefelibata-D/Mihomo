@@ -39,6 +39,10 @@ type HealthCheck struct {
 	lastTouch      atomic.TypedValue[time.Time]
 	singleDo       *singledo.Single[struct{}]
 	timeout        time.Duration
+	observerMu     sync.Mutex
+	observers      map[uint64]func()
+	nextObserver   uint64
+	running        bool
 }
 
 func (hc *HealthCheck) process() {
@@ -126,6 +130,10 @@ func (hc *HealthCheck) check() {
 	}
 
 	_, _, _ = hc.singleDo.Do(func() (struct{}, error) {
+		hc.observerMu.Lock()
+		hc.running = true
+		hc.observerMu.Unlock()
+		defer hc.notifyComplete()
 		id := utils.NewUUIDV4().String()
 		log.Debugln("Start New Health Checking {%s}", id)
 		b := new(errgroup.Group)
@@ -213,5 +221,30 @@ func NewHealthCheck(proxies []C.Proxy, url string, timeout uint, interval uint, 
 		lazy:           lazy,
 		expectedStatus: expectedStatus,
 		singleDo:       singledo.NewSingle[struct{}](time.Second),
+	}
+}
+
+// observeCompletion attaches a result consumer without creating another probe or timer.
+func (hc *HealthCheck) observeCompletion(fn func()) func() {
+	hc.observerMu.Lock()
+	if hc.observers == nil {
+		hc.observers = map[uint64]func(){}
+	}
+	hc.nextObserver++
+	id := hc.nextObserver
+	hc.observers[id] = fn
+	hc.observerMu.Unlock()
+	return func() { hc.observerMu.Lock(); delete(hc.observers, id); hc.observerMu.Unlock() }
+}
+func (hc *HealthCheck) notifyComplete() {
+	hc.observerMu.Lock()
+	hc.running = false
+	callbacks := make([]func(), 0, len(hc.observers))
+	for _, fn := range hc.observers {
+		callbacks = append(callbacks, fn)
+	}
+	hc.observerMu.Unlock()
+	for _, fn := range callbacks {
+		fn()
 	}
 }

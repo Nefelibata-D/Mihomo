@@ -41,6 +41,7 @@ type LoadBalance struct {
 	strategyFn     strategyFn
 	strategyStart  func()
 	strategyClose  func()
+	strategyHealth func()
 	testUrl        string
 	expectedStatus string
 }
@@ -321,6 +322,7 @@ func NewLoadBalance(option GroupCommonOption, loadBalanceOption LoadBalanceOptio
 	var strategyFn strategyFn
 	var strategyStart func()
 	var strategyClose func()
+	var strategyHealth func()
 	withKey, err := hashKey(loadBalanceOption.HashKey)
 	if err != nil {
 		return nil, err
@@ -355,23 +357,22 @@ func NewLoadBalance(option GroupCommonOption, loadBalanceOption LoadBalanceOptio
 		if err != nil {
 			return nil, err
 		}
-		// A single static candidate is allowed. Routing has already selected
-		// this group, and with no alternative there is no node-to-node balancing
-		// to perform. The weighted-sticky session still applies account
-		// admission, so a disabled or grace-restricted node is not bypassed.
+		// One server or one proxy still uses the same sticky scheduling rules.
 		config, err := weightedsticky.ParseOptions(loadBalanceOption.WeightedSticky, staticNames, dynamic)
 		if err != nil {
 			return nil, err
 		}
 		config.Blacklist = loadBalanceOption.SiteBlacklist
-		strategyFn, strategyStart, strategyClose, err = newWeightedStickyStrategy(option.Name, config, option.URL)
+		strategy, makeErr := newWeightedStickyStrategy(option.Name, config, option.URL, providers, func() []C.Proxy { return lb.GetProxies(false) })
+		err = makeErr
 		if err != nil {
 			return nil, err
 		}
+		strategyFn, strategyStart, strategyClose, strategyHealth = strategy.SelectProxy, strategy.Start, strategy.Close, strategy.ObserveHealth
 	default:
 		return nil, fmt.Errorf("%w: %s", errStrategy, loadBalanceOption.Strategy)
 	}
-	return &LoadBalance{
+	lb = &LoadBalance{
 		siteBlacklist: loadBalanceOption.SiteBlacklist,
 		GroupBase: NewGroupBase(GroupBaseOption{
 			Name:           option.Name,
@@ -389,10 +390,18 @@ func NewLoadBalance(option GroupCommonOption, loadBalanceOption LoadBalanceOptio
 		strategyFn:     strategyFn,
 		strategyStart:  strategyStart,
 		strategyClose:  strategyClose,
+		strategyHealth: strategyHealth,
 		disableUDP:     option.DisableUDP,
 		testUrl:        option.URL,
 		expectedStatus: option.ExpectedStatus,
-	}, nil
+	}
+	return lb, nil
+}
+
+func (lb *LoadBalance) HealthCheckCompleted(url string) {
+	if lb.strategyHealth != nil && url == lb.testUrl {
+		lb.strategyHealth()
+	}
 }
 
 // NeedsProcessMetadata lets tunnel use its normal process lookup before selection.

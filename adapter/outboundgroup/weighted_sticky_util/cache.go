@@ -10,11 +10,6 @@ import (
 // binding is never evicted to make room; the caller must surface this error.
 var ErrBindingCapacity = errors.New("weighted-sticky: binding cache capacity exceeded")
 
-// ErrBindingNotAllowed reports that a dial succeeded but admission no longer
-// allows publishing a binding on that node. The connection must not be treated
-// as approved.
-var ErrBindingNotAllowed = errors.New("weighted-sticky: binding install rejected by admission")
-
 // Binding is one website binding. The generation makes an old connection
 // unable to renew or delete a binding created after it expired.
 type Binding struct {
@@ -158,23 +153,14 @@ func (c *Cache) purgeExpiredLocked(now time.Time) {
 	}
 }
 
-// Rebind installs a binding on the node that actually carried the connection.
-// It only replaces the expected generation, so a late successful dial from an
-// older connection cannot overwrite a newer binding. installed=false with a
-// nil error means the connection succeeded but the shared binding was not
-// installed; the connection may keep using its own handle. allowed is checked
-// under the cache lock so a disabled node cannot be published concurrently
-// with its invalidation.
-func (c *Cache) Rebind(key string, expectedGeneration uint64, proxyName string, allowed func(string) bool) (*Handle, bool, error) {
+// Rebind installs only over the expected generation; a late success cannot overwrite a newer binding.
+func (c *Cache) Rebind(key string, expectedGeneration uint64, proxyName string) (*Handle, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if allowed != nil && !allowed(proxyName) {
-		return nil, false, ErrBindingNotAllowed
-	}
 	current, ok := c.entries[key]
 	if !ok || current.generation != expectedGeneration {
-		return nil, false, nil
+		return nil, false
 	}
 
 	now := c.now()
@@ -187,23 +173,10 @@ func (c *Cache) Rebind(key string, expectedGeneration uint64, proxyName string, 
 		refs:         1,
 	}
 	c.entries[key] = b
-	return &Handle{cache: c, binding: b, fresh: false}, true, nil
+	return &Handle{cache: c, binding: b, fresh: false}, true
 }
 
-// InvalidateNode removes every binding on one node. It is used when the
-// account becomes disabled for that node; other nodes and other strategy
-// instances are untouched.
-func (c *Cache) InvalidateNode(proxyName string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for key, binding := range c.entries {
-		if binding.proxyName == proxyName {
-			delete(c.entries, key)
-		}
-	}
-}
-
-// PruneProxies removes bindings whose node disappeared from the provider.
+// PruneProxies removes bindings outside the configured names of all currently present servers.
 // The list is bounded by the observed candidate names, so a deleted provider
 // entry cannot leave a growing name history in the cache. An active
 // connection keeps its own handle; renewal is ignored once the binding is no

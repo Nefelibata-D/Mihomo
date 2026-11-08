@@ -8,12 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/metacubex/mihomo/log"
-
 	"github.com/gofrs/uuid/v5"
 )
-
-const maxControlNodes = 32
 
 // removedResilienceKeys are rejected with an explicit migration message.
 // Leaving them in the unknown-key path would make an old configuration look
@@ -40,10 +36,9 @@ var controlKeys = map[string]struct{}{
 	"timeout":        {},
 	"min-interval":   {},
 	"grace-interval": {},
-	"node-ids":       {},
 }
 
-func parseResilience(value any, staticNames []string, dynamic bool) (*ResilienceOptions, error) {
+func parseResilience(value any) (*ResilienceOptions, error) {
 	mapping, ok := value.(map[string]any)
 	if !ok {
 		return nil, errors.New("weighted-sticky resilience must be a mapping")
@@ -78,7 +73,7 @@ func parseResilience(value any, staticNames []string, dynamic bool) (*Resilience
 	if !ok {
 		return nil, errors.New("weighted-sticky resilience requires a control block")
 	}
-	control, err := parseControlConfig(controlRaw, staticNames, dynamic)
+	control, err := parseControlConfig(controlRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -87,10 +82,13 @@ func parseResilience(value any, staticNames []string, dynamic bool) (*Resilience
 	return options, nil
 }
 
-func parseControlConfig(value any, staticNames []string, dynamic bool) (ControlConfig, error) {
+func parseControlConfig(value any) (ControlConfig, error) {
 	mapping, ok := value.(map[string]any)
 	if !ok {
 		return ControlConfig{}, errors.New("weighted-sticky resilience control must be a mapping")
+	}
+	if _, ok := mapping["node-ids"]; ok {
+		return ControlConfig{}, errors.New("weighted-sticky control.node-ids was removed; use nodes[].id and nodes[].proxies")
 	}
 	if err := rejectUnknownKeys(mapping, controlKeys, "weighted-sticky resilience control"); err != nil {
 		return ControlConfig{}, err
@@ -142,53 +140,6 @@ func parseControlConfig(value any, staticNames []string, dynamic bool) (ControlC
 		config.GraceInterval = interval
 	}
 
-	rawNodes, ok := mapping["node-ids"].(map[string]any)
-	if !ok || len(rawNodes) == 0 {
-		return ControlConfig{}, errors.New("weighted-sticky resilience control node-ids must be a non-empty mapping")
-	}
-	nodeIDs := make(map[string]string, len(rawNodes))
-	for name, rawNode := range rawNodes {
-		if strings.TrimSpace(name) == "" {
-			return ControlConfig{}, errors.New("weighted-sticky resilience control node-ids contains an empty proxy name")
-		}
-		node, ok := rawNode.(string)
-		if !ok || strings.TrimSpace(node) == "" {
-			return ControlConfig{}, fmt.Errorf("weighted-sticky resilience control node-ids[%q] must be a non-empty string", name)
-		}
-		if strings.ContainsAny(node, "/ \t\r\n") {
-			return ControlConfig{}, fmt.Errorf("weighted-sticky resilience control node-ids[%q] contains an invalid node id", name)
-		}
-		nodeIDs[name] = node
-	}
-	// The experiment supports at most 32 servers. Several proxy names (aliases)
-	// may map to one node, so the limit counts distinct node ids, not names.
-	distinctNodes := make(map[string]struct{}, len(nodeIDs))
-	for _, node := range nodeIDs {
-		distinctNodes[node] = struct{}{}
-	}
-	if len(distinctNodes) > maxControlNodes {
-		return ControlConfig{}, fmt.Errorf("weighted-sticky resilience control node-ids has %d distinct nodes; at most %d are supported", len(distinctNodes), maxControlNodes)
-	}
-
-	static := make(map[string]struct{}, len(staticNames))
-	for _, name := range staticNames {
-		static[name] = struct{}{}
-	}
-	for _, name := range staticNames {
-		if _, ok := nodeIDs[name]; !ok {
-			return ControlConfig{}, fmt.Errorf("weighted-sticky resilience control node-ids is missing candidate %q", name)
-		}
-	}
-	for name := range nodeIDs {
-		if _, ok := static[name]; ok {
-			continue
-		}
-		if !dynamic {
-			return ControlConfig{}, fmt.Errorf("weighted-sticky resilience control node-ids references unknown proxy %q", name)
-		}
-		log.Debugln("weighted-sticky: control node-ids entry %q has no candidate yet; it will apply if the provider adds it", name)
-	}
-	config.NodeIDs = nodeIDs
 	return config, nil
 }
 

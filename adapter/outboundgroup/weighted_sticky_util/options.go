@@ -7,13 +7,10 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/metacubex/mihomo/log"
 )
 
 const (
 	defaultWeightedStickyIdleTimeout = 300 * time.Second
-	defaultWeightedStickyWeight      = 1
 	defaultWeightedStickyMaxBindings = 10000
 
 	defaultControlTimeout       = 3 * time.Second
@@ -36,31 +33,28 @@ type ControlConfig struct {
 	Timeout       time.Duration
 	MinInterval   time.Duration
 	GraceInterval time.Duration
-	NodeIDs       map[string]string
 }
 
 // Options is the validated form of the `weighted-sticky` block.
 // It never carries a country, price or quota role: cache identity comes from
 // site-groups and the request identity, health comes from the official proxy
-// group check, and account admission comes only from the control endpoint.
+// group check, and quota observations come only from the control endpoint.
 type Options struct {
-	IdleTimeout   time.Duration
-	DefaultWeight int
-	Weights       map[string]int
-	MaxBindings   int
-	SiteGroups    []SiteGroup
-	Sites         *SiteGroupIndex
-	Blacklist     *SiteBlacklistIndex
-	Resilience    *ResilienceOptions
+	IdleTimeout time.Duration
+	Nodes       []Node
+	MaxBindings int
+	SiteGroups  []SiteGroup
+	Sites       *SiteGroupIndex
+	Blacklist   *SiteBlacklistIndex
+	Resilience  *ResilienceOptions
 }
 
 var weightedStickyOptionKeys = map[string]struct{}{
-	"idle-timeout":   {},
-	"default-weight": {},
-	"weights":        {},
-	"max-bindings":   {},
-	"site-groups":    {},
-	"resilience":     {},
+	"idle-timeout": {},
+	"nodes":        {},
+	"max-bindings": {},
+	"site-groups":  {},
+	"resilience":   {},
 }
 
 var siteGroupKeys = map[string]struct{}{
@@ -69,151 +63,51 @@ var siteGroupKeys = map[string]struct{}{
 	"domain-suffixes": {},
 }
 
-// ParseOptions validates the raw block. Omitted values take the
-// documented defaults. Unknown keys are errors: a typo must not silently
-// produce a different strategy. staticNames are the node names visible from
-// static `proxies`; dynamic reports whether a `use` provider can add names
-// later, in which case an unmatched weight is only a diagnostic.
+// ParseOptions validates server ownership independently of optional quota observation.
 func ParseOptions(raw map[string]any, staticNames []string, dynamic bool) (*Options, error) {
-	config := &Options{
-		IdleTimeout:   defaultWeightedStickyIdleTimeout,
-		DefaultWeight: defaultWeightedStickyWeight,
-		Weights:       map[string]int{},
-		MaxBindings:   defaultWeightedStickyMaxBindings,
-	}
-
-	if raw != nil {
-		if err := rejectUnknownKeys(raw, weightedStickyOptionKeys, "weighted-sticky option"); err != nil {
-			return nil, err
-		}
-
-		if value, ok := raw["idle-timeout"]; ok {
-			timeout, err := strictPositiveSeconds(value, "weighted-sticky idle-timeout")
-			if err != nil {
-				return nil, err
-			}
-			config.IdleTimeout = timeout
-		}
-
-		if value, ok := raw["default-weight"]; ok {
-			weight, err := strictNonNegativeInt(value, "weighted-sticky default-weight")
-			if err != nil {
-				return nil, err
-			}
-			config.DefaultWeight = weight
-		}
-
-		if value, ok := raw["max-bindings"]; ok {
-			maxBindings, err := strictNonNegativeInt(value, "weighted-sticky max-bindings")
-			if err != nil {
-				return nil, err
-			}
-			if maxBindings == 0 {
-				return nil, errors.New("weighted-sticky max-bindings must be positive")
-			}
-			config.MaxBindings = maxBindings
-		}
-
-		if value, ok := raw["weights"]; ok {
-			mapping, ok := value.(map[string]any)
-			if !ok {
-				return nil, errors.New("weighted-sticky weights must be a mapping of node name to integer")
-			}
-			for name, rawWeight := range mapping {
-				if strings.TrimSpace(name) == "" {
-					return nil, errors.New("weighted-sticky weights contains an empty node name")
-				}
-				weight, err := strictNonNegativeInt(rawWeight, fmt.Sprintf("weighted-sticky weights[%q]", name))
-				if err != nil {
-					return nil, err
-				}
-				config.Weights[name] = weight
-			}
-		}
-
-		if value, ok := raw["site-groups"]; ok {
-			groups, err := parseWeightedStickySiteGroups(value)
-			if err != nil {
-				return nil, err
-			}
-			config.SiteGroups = groups
-		}
-
-		if value, ok := raw["resilience"]; ok {
-			resilience, err := parseResilience(value, staticNames, dynamic)
-			if err != nil {
-				return nil, err
-			}
-			config.Resilience = resilience
+	config := &Options{IdleTimeout: defaultWeightedStickyIdleTimeout, MaxBindings: defaultWeightedStickyMaxBindings}
+	for _, key := range []string{"weights", "default-weight"} {
+		if _, ok := raw[key]; ok {
+			return nil, fmt.Errorf("weighted-sticky %s was removed; migrate to nodes with server weights and proxy membership", key)
 		}
 	}
-
-	if config.DefaultWeight == 0 {
-		positive := false
-		for _, weight := range config.Weights {
-			if weight > 0 {
-				positive = true
-				break
-			}
-		}
-		if !positive {
-			return nil, errors.New("weighted-sticky: every weight is zero, no candidate could ever be selected")
-		}
+	if err := rejectUnknownKeys(raw, weightedStickyOptionKeys, "weighted-sticky option"); err != nil {
+		return nil, err
 	}
-
-	if !dynamic {
-		known := make(map[string]struct{}, len(staticNames))
-		for _, name := range staticNames {
-			known[name] = struct{}{}
-		}
-		names := make([]string, 0, len(config.Weights))
-		for name := range config.Weights {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			if _, ok := known[name]; !ok {
-				return nil, fmt.Errorf("weighted-sticky weights references unknown proxy %q", name)
-			}
-		}
-
-		// With static candidates the whole weight sum is known at load time;
-		// report overflow as a configuration error rather than at first dial.
-		var total uint64
-		for name := range known {
-			weight := config.DefaultWeight
-			if configured, ok := config.Weights[name]; ok {
-				weight = configured
-			}
-			if total > uint64(math.MaxInt)-uint64(weight) {
-				return nil, ErrWeightOverflow
-			}
-			total += uint64(weight)
-		}
-		// A non-zero default weight does not help when every actual static
-		// candidate overrides itself to zero: no candidate could be selected.
-		if len(known) > 0 && total == 0 {
-			return nil, errors.New("weighted-sticky: every weight is zero, no candidate could ever be selected")
-		}
-	} else {
-		known := make(map[string]struct{}, len(staticNames))
-		for _, name := range staticNames {
-			known[name] = struct{}{}
-		}
-		for name := range config.Weights {
-			if _, ok := known[name]; !ok {
-				log.Debugln("weighted-sticky: weights entry %q has no candidate yet; it will apply if the provider adds it", name)
-			}
-		}
-	}
-
-	index, err := NewSiteGroupIndex(config.SiteGroups)
+	var err error
+	config.Nodes, err = parseNodes(raw["nodes"], staticNames, dynamic)
 	if err != nil {
 		return nil, err
 	}
-	config.Sites = index
-
-	return config, nil
+	if value, ok := raw["idle-timeout"]; ok {
+		config.IdleTimeout, err = strictPositiveSeconds(value, "weighted-sticky idle-timeout")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if value, ok := raw["max-bindings"]; ok {
+		config.MaxBindings, err = strictNonNegativeInt(value, "weighted-sticky max-bindings")
+		if err != nil {
+			return nil, err
+		}
+		if config.MaxBindings == 0 {
+			return nil, errors.New("weighted-sticky max-bindings must be positive")
+		}
+	}
+	if value, ok := raw["site-groups"]; ok {
+		config.SiteGroups, err = parseWeightedStickySiteGroups(value)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if value, ok := raw["resilience"]; ok {
+		config.Resilience, err = parseResilience(value)
+		if err != nil {
+			return nil, err
+		}
+	}
+	config.Sites, err = NewSiteGroupIndex(config.SiteGroups)
+	return config, err
 }
 
 func parseWeightedStickySiteGroups(value any) ([]SiteGroup, error) {

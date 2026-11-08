@@ -126,6 +126,11 @@ func getProxyDelay(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	delay, err := proxy.URLTest(ctx, url, expectedStatus)
+	for _, candidate := range tunnel.Proxies() {
+		if group, ok := candidate.Adapter().(*outboundgroup.LoadBalance); ok {
+			group.HealthCheckCompleted(url)
+		}
+	}
 	if ctx.Err() != nil {
 		render.Status(r, http.StatusGatewayTimeout)
 		render.JSON(w, r, ErrRequestTimeout)

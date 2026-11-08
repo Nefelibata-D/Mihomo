@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
@@ -33,9 +34,11 @@ type internalProxyState struct {
 
 type Proxy struct {
 	C.ProxyAdapter
-	alive   atomic.Bool
-	history *queue.Queue[C.DelayHistory]
-	extra   xsync.Map[string, *internalProxyState]
+	alive         atomic.Bool
+	history       *queue.Queue[C.DelayHistory]
+	extra         xsync.Map[string, *internalProxyState]
+	healthMu      sync.Mutex
+	healthRunning map[string]int
 }
 
 // Adapter implements C.Proxy
@@ -164,6 +167,20 @@ func (p *Proxy) MarshalJSON() ([]byte, error) {
 // URLTest get the delay for the specified URL
 // implements C.Proxy
 func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (t uint16, err error) {
+	p.healthMu.Lock()
+	if p.healthRunning == nil {
+		p.healthRunning = map[string]int{}
+	}
+	p.healthRunning[url]++
+	p.healthMu.Unlock()
+	defer func() {
+		p.healthMu.Lock()
+		p.healthRunning[url]--
+		if p.healthRunning[url] == 0 {
+			delete(p.healthRunning, url)
+		}
+		p.healthMu.Unlock()
+	}()
 	var satisfied bool
 
 	defer func() {
@@ -312,4 +329,11 @@ func urlToMetadata(rawURL string) (addr C.Metadata, err error) {
 
 	err = addr.SetRemoteAddress(net.JoinHostPort(u.Hostname(), port))
 	return
+}
+
+// HealthCheckRunningForURL lets result consumers avoid aggregating a partially completed probe batch.
+func (p *Proxy) HealthCheckRunningForURL(url string) bool {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	return p.healthRunning[url] > 0
 }

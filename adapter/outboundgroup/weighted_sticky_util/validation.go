@@ -89,10 +89,10 @@ func (t *stoppableTimer) Stop() {
 //
 // Rules implemented here:
 //   - one check per node in flight; triggers while in flight are dropped;
-//   - normal/unknown nodes are queried only on load and on business failure,
+//   - normal/unknown nodes are queried only on load and on all-proxy health failure,
 //     rate-limited by MinInterval;
 //   - grace nodes are queried every GraceInterval, including without traffic;
-//   - disabled nodes stop periodic queries until the instance is reloaded;
+//   - disabled nodes have no periodic timer; all-failed health events may query again;
 //   - failed queries keep the last explicit status;
 //   - no missed period is backfilled: each result schedules at most one next
 //     timer, from the time of that result.
@@ -182,11 +182,11 @@ func (v *Validator) Start() {
 	go v.loop(ctx)
 }
 
-// TriggerFailure reports a business dial failure. It never queues a delayed
+// TriggerHealthFailure reports completed official health records for a server. It never queues a delayed
 // task: if the validator is not running, the node is unknown or already
-// queued, a check is in flight, the node is disabled/grace, or the minimum
+// queued, a check is in flight, the node is in grace, or the minimum
 // interval has not elapsed, the trigger is dropped.
-func (v *Validator) TriggerFailure(nodeID string) {
+func (v *Validator) TriggerHealthFailure(nodeID string) {
 	if nodeID == "" {
 		return
 	}
@@ -299,6 +299,9 @@ func (v *Validator) loop(ctx context.Context) {
 			return
 
 		case result := <-results:
+			if ctx.Err() != nil {
+				return
+			}
 			delete(inflight, result.node)
 			before := v.store.Get(result.node).Status
 			now := v.clock.Now()
@@ -313,7 +316,11 @@ func (v *Validator) loop(ctx context.Context) {
 			}
 			current := v.store.Get(result.node).Status
 			if current == AccountStatusGrace {
-				schedule(result.node, v.graceInterval)
+				interval := v.graceInterval
+				if interval < v.minInterval {
+					interval = v.minInterval
+				}
+				schedule(result.node, interval)
 			} else if timer, ok := timers[result.node]; ok {
 				timer.Stop()
 				delete(timers, result.node)
@@ -330,8 +337,8 @@ func (v *Validator) loop(ctx context.Context) {
 			}
 			status := v.store.Get(node).Status
 			switch status {
-			case AccountStatusDisabled, AccountStatusGrace:
-				// Disabled has no periodic queries; grace has its own
+			case AccountStatusGrace:
+				// Grace has its own
 				// schedule and must not accumulate failure triggers.
 				continue
 			}

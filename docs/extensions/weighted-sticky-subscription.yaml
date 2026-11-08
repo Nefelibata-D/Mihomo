@@ -37,10 +37,16 @@
 #
 # resilience.control 查询 GET {base-url}/v1/nodes/{node-id}/status，
 # 使用 Authorization: Bearer {uuid}。200=normal，409=grace，403=disabled。
-# normal 允许新绑定；grace 仅允许已有绑定；disabled 禁用并清除该节点绑定。
-# 查询失败保持最近明确状态；未知状态不准入。健康检查不改变账户状态。
-# 所有参与组的节点都需 node-ids 映射，无额度限制的节点由管理端返回 normal。
-# 普通 select 组及其他负载策略不读取 site-blacklist 或账户准入配置。
+# 额度状态仅观察；不阻止新连接、不清理绑定，服务器执行最终限额。
+# 查询失败保持最近明确状态；无历史则未知。健康检查不改变账户状态。
+# 按 nodes[].id 查询，同服务器代理共享结果；启动和全服务器健康异常触发，宽限周期观察。
+# 健康沿用官方 URLTest、定时与失败触发；额度查询异步并发、每服务器去重和限频。
+# 正常选择先筛健康，再黑名单择优，然后服务器加权、服务器内等概率抽选。
+# 官方重试每次只拨一个代理：第一轮原服务器优先，第二轮所有实际成员各一次。
+# 旧绑定原服务器每代理首轮最多两次，其余一次；新分配首轮每代理一次，含首次。
+# 两轮机会耗尽即停止；官方十次总尝试、超时和等待机制不变，没有内层拨号循环。
+# weights/default-weight/control.node-ids 已移除；权重必须为正整数。
+# 普通 select 组及其他负载策略不读取这些扩展配置。
 #
 # beta 版额外写入配置目录 diagnostics/weighted-sticky/*.ndjson，记录选路、
 # 状态变化和失败事件。日志包含站点信息；普通版不生成该诊断文件。
@@ -101,15 +107,20 @@ proxy-groups:
     proxies: [日本出口, 美国出口]
     url: https://health.example.invalid/ready
     expected-status: 204
-    interval: 300
+    interval: 1800
     lazy: false
     strategy: weighted-sticky
     weighted-sticky:
       idle-timeout: 300
-      default-weight: 1
-      weights:
-        日本出口: 7
-        美国出口: 3
+      nodes:
+        - name: 日本服务器
+          id: jp-guid
+          weight: 7
+          proxies: [日本出口]
+        - name: 美国服务器
+          id: us-guid
+          weight: 3
+          proxies: [美国出口]
       max-bindings: 10000
       resilience:
         enabled: true
@@ -119,9 +130,6 @@ proxy-groups:
           timeout: 3
           min-interval: 30
           grace-interval: 300
-          node-ids:
-            日本出口: jp
-            美国出口: us
 
 rules:
   # 需要固定出口的网站。

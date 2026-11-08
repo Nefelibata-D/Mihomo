@@ -466,3 +466,12 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
 		return proxies, nil
 	}, nil
 }
+
+func (bp *baseProvider) ObserveHealthCheck(fn func()) func() {
+	return bp.healthCheck.observeCompletion(fn)
+}
+func (bp *baseProvider) HealthCheckRunning() bool {
+	bp.healthCheck.observerMu.Lock()
+	defer bp.healthCheck.observerMu.Unlock()
+	return bp.healthCheck.running
+}

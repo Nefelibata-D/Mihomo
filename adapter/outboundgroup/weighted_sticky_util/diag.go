@@ -25,8 +25,7 @@ const (
 // diagConfig is the runtime configuration summary recorded when a strategy
 // starts. It deliberately has no field for the control URL or credential.
 type diagConfig struct {
-	DefaultWeight     int
-	Weights           map[string]int
+	Nodes             []Node
 	IdleTimeout       time.Duration
 	NodeIDs           map[string]string
 	BlacklistEnabled  bool
@@ -66,11 +65,6 @@ func (noopDiag) Unregister(string)                       {}
 func (noopDiag) Emit(diagEvent)                          {}
 func (noopDiag) AddCount(string, string, string, uint64) {}
 
-type diagNodeWeight struct {
-	Node   string `json:"node"`
-	Weight int    `json:"weight"`
-}
-
 // diagSequence provides process-local instance and flow IDs. It is independent
 // of the strategy's random source, so diagnostics never perturb a draw.
 var diagSequence atomic.Uint64
@@ -79,17 +73,12 @@ func newDiagInstanceID() string { return fmt.Sprintf("i%d", diagSequence.Add(1))
 func newDiagFlowID() string     { return fmt.Sprintf("f%d", diagSequence.Add(1)) }
 
 func (c diagConfig) fields() map[string]any {
-	weights := make(map[string]int, len(c.Weights))
-	for name, weight := range c.Weights {
-		weights[name] = weight
-	}
 	nodeIDs := make(map[string]string, len(c.NodeIDs))
 	for name, node := range c.NodeIDs {
 		nodeIDs[name] = node
 	}
 	return map[string]any{
-		"default_weight":       c.DefaultWeight,
-		"weights":              weights,
+		"nodes":                c.Nodes,
 		"idle_timeout_seconds": int64(c.IdleTimeout / time.Second),
 		"node_ids":             nodeIDs,
 		"blacklist_enabled":    c.BlacklistEnabled,
@@ -129,40 +118,14 @@ func (s *Strategy) diagKeyID(key string) string {
 	return s.diag.KeyID(key)
 }
 
-func (s *Strategy) diagStatus(proxy C.Proxy) AccountStatus {
-	if proxy == nil || s.policy == nil {
-		return AccountStatusUnknown
-	}
-	nodeID := s.nodeID(proxy)
-	if nodeID == "" {
-		return AccountStatusUnknown
-	}
-	return s.policy.Get(nodeID).Status
-}
-
 func (s *Strategy) diagConfig() diagConfig {
 	return diagConfig{
-		DefaultWeight:     s.config.DefaultWeight,
-		Weights:           s.config.Weights,
+		Nodes:             s.config.Nodes,
 		IdleTimeout:       s.config.IdleTimeout,
 		NodeIDs:           s.nodeIDs,
 		BlacklistEnabled:  s.config.Blacklist != nil,
 		ManagementEnabled: s.policy != nil,
 	}
-}
-
-func (s *Strategy) diagPool(pool []C.Proxy) ([]diagNodeWeight, int) {
-	weights := make([]diagNodeWeight, 0, len(pool))
-	total := 0
-	for _, proxy := range pool {
-		weight := s.weightOf(proxy)
-		if weight <= 0 {
-			continue
-		}
-		weights = append(weights, diagNodeWeight{Node: proxy.Name(), Weight: weight})
-		total += weight
-	}
-	return weights, total
 }
 
 func diagCandidateNames(candidates []C.Proxy) []string {
@@ -226,15 +189,4 @@ func diagErrorClass(err error) string {
 		return "timeout"
 	}
 	return "other"
-}
-
-func diagDrawErrorClass(err error) string {
-	switch {
-	case errors.Is(err, ErrNoAvailableCandidates):
-		return "no_candidate"
-	case errors.Is(err, ErrWeightOverflow):
-		return "weight_overflow"
-	default:
-		return "draw_error"
-	}
 }

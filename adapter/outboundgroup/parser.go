@@ -70,6 +70,10 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		log.Errorln("The group [%s] with dialer-proxy configuration is not allowed, please set it directly on the proxy instead", groupOption.Name)
 	}
 
+	// Preserve explicit intervals and other strategies' upstream defaults.
+	if _, explicit := config["interval"]; !explicit && config["strategy"] == "weighted-sticky" {
+		groupOption.Interval = 1800
+	}
 	groupName := groupOption.Name
 
 	if groupOption.EmptyFallback == "" {
@@ -169,7 +173,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 
 		// select don't need auto health check
 		if groupOption.Type != "select" && groupOption.Type != "relay" {
-			if groupOption.Interval == 0 {
+			if _, explicit := config["interval"]; groupOption.Interval == 0 && !(config["strategy"] == "weighted-sticky" && explicit) {
 				groupOption.Interval = 300
 			}
 		}

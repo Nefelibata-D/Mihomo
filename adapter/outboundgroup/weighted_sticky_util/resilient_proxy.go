@@ -25,7 +25,19 @@ type resilientProxy struct {
 var _ C.Proxy = (*resilientProxy)(nil)
 
 func (p *resilientProxy) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
-	session, finish, err := p.strategy.sessionFor(ctx, p.key, p.host, p.candidates, metadata)
+	if err := ctx.Err(); err != nil {
+		return nil, stopRetry(err)
+	}
+	candidates := p.candidates
+	if p.strategy.candidates != nil {
+		candidates = p.strategy.candidates()
+	}
+	var err error
+	candidates, err = p.strategy.validateCandidates(candidates)
+	if err != nil {
+		return nil, stopRetry(err)
+	}
+	session, finish, err := p.strategy.sessionFor(ctx, p.key, p.host, candidates, metadata)
 	if finish != nil {
 		defer finish()
 	}
@@ -33,7 +45,7 @@ func (p *resilientProxy) DialContext(ctx context.Context, metadata *C.Metadata) 
 		return nil, err
 	}
 
-	proxy, err := session.next(p.candidates)
+	proxy, err := session.next(candidates)
 	if err != nil {
 		return nil, err
 	}
@@ -56,8 +68,7 @@ func (p *resilientProxy) DialContext(ctx context.Context, metadata *C.Metadata) 
 		}
 		session.noteFailure(proxy)
 		// A dial failure is safe to retry by the official loop. It is also the
-		// trigger for the rate-limited management status query.
-		p.strategy.attemptFailed(proxy)
+		// official health-check trigger at the group boundary.
 		return nil, err
 	}
 	if conn == nil {
@@ -112,7 +123,19 @@ func (p *resilientProxy) DialContext(ctx context.Context, metadata *C.Metadata) 
 }
 
 func (p *resilientProxy) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (C.PacketConn, error) {
-	session, finish, err := p.strategy.sessionFor(ctx, p.key, p.host, p.candidates, metadata)
+	if err := ctx.Err(); err != nil {
+		return nil, stopRetry(err)
+	}
+	candidates := p.candidates
+	if p.strategy.candidates != nil {
+		candidates = p.strategy.candidates()
+	}
+	var err error
+	candidates, err = p.strategy.validateCandidates(candidates)
+	if err != nil {
+		return nil, stopRetry(err)
+	}
+	session, finish, err := p.strategy.sessionFor(ctx, p.key, p.host, candidates, metadata)
 	if finish != nil {
 		defer finish()
 	}
@@ -120,7 +143,7 @@ func (p *resilientProxy) ListenPacketContext(ctx context.Context, metadata *C.Me
 		return nil, err
 	}
 
-	proxy, err := session.next(p.candidates)
+	proxy, err := session.next(candidates)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +165,6 @@ func (p *resilientProxy) ListenPacketContext(ctx context.Context, metadata *C.Me
 			p.strategy.diagAddCount(proxy.Name(), diagMetricFailure, 1)
 		}
 		session.noteFailure(proxy)
-		p.strategy.attemptFailed(proxy)
 		return nil, err
 	}
 	if conn == nil {

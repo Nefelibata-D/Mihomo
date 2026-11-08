@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// AccountStatus is the admission state of one management account on one node.
+// AccountStatus is the observed quota state of one management account on one node.
 // AccountStatusUnknown is the client's own condition before a valid control
 // response has been received; it is never produced by the control server.
 type AccountStatus uint8
@@ -80,25 +80,4 @@ func (p *PolicyStore) RecordFailure(nodeID string, at time.Time) {
 	record.LastCheck = at
 	record.LastFailure = at
 	p.records[nodeID] = record
-}
-
-// AllowsNewBinding reports whether a new website binding may be created on
-// this node. Unknown is allowed: the server is the final authority and the
-// first startup must not fabricate a quota. Grace and disabled forbid new
-// bindings.
-func (p *PolicyStore) AllowsNewBinding(nodeID string) bool {
-	switch p.Get(nodeID).Status {
-	case AccountStatusUnknown, AccountStatusNormal:
-		return true
-	default:
-		return false
-	}
-}
-
-// AllowsExistingBinding reports whether an already cached binding may still be
-// tried. Grace keeps old bindings; the server independently decides whether a
-// particular old site is still allowed. Disabled invalidates all bindings on
-// that account/node.
-func (p *PolicyStore) AllowsExistingBinding(nodeID string) bool {
-	return p.Get(nodeID).Status != AccountStatusDisabled
 }
