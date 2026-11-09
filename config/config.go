@@ -989,8 +989,10 @@ func parseProxies(cfg *RawConfig, blacklistEntries []weightedsticky.SiteBlacklis
 					return nil, nil, fmt.Errorf("site-blacklist[%d] references unknown weighted-sticky group %q", i, entry.Group)
 				}
 			}
-			if _, ok := known[entry.Proxy]; !ok && !dynamic {
-				return nil, nil, fmt.Errorf("site-blacklist[%d] references unknown proxy %q", i, entry.Proxy)
+			for _, proxy := range entry.Proxies {
+				if _, ok := known[proxy]; !ok && !dynamic {
+					return nil, nil, fmt.Errorf("site-blacklist[%d] references unknown proxy %q", i, proxy)
+				}
 			}
 		}
 	}

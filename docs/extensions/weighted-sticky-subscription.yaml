@@ -91,15 +91,17 @@ proxies:
       public-key: ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0A
       short-id: "00000000"
 
-# 新绑定的网站黑名单。
+# 新绑定的网站黑名单：每组一个条目，每条规则末尾列出排除的代理。
+# rules 使用 类型,内容,[代理A, 代理B]；含逗号、方括号或引号的名称使用 JSON 双引号。
+# group 必填且不重复；发布的代理列表不能为空；旧 proxy 字段不再接受。
 site-blacklist:
-  - proxy: 日本出口
+  - group: 默认负载
     rules:
-      - DOMAIN,sensitive.example.invalid
-      - DOMAIN-SUFFIX,media.example.invalid
-      - DOMAIN-KEYWORD,stream
-      - 'DOMAIN-REGEX,^video[0-9]+\.example\.invalid$'
-      - DOMAIN-WILDCARD,*.cdn.example.invalid
+      - DOMAIN,sensitive.example.invalid,[日本出口]
+      - DOMAIN-SUFFIX,media.example.invalid,[日本出口, 美国出口]
+      - DOMAIN-KEYWORD,stream,[日本出口]
+      - 'DOMAIN-REGEX,^video[0-9]+\.example\.invalid$,[日本出口]'
+      - DOMAIN-WILDCARD,*.cdn.example.invalid,[日本出口]
 
 proxy-groups:
   # 单节点路由。

@@ -11,7 +11,7 @@ import (
 )
 
 type SiteBlacklistEntry struct {
-	Proxy        string
+	Proxies      []string
 	Group        string
 	rules        []C.Rule
 	providers    []string
@@ -41,36 +41,41 @@ func ParseSiteBlacklist(value any) ([]SiteBlacklistEntry, *SiteBlacklistIndex, e
 		return nil, nil, fmt.Errorf("site-blacklist must be a list")
 	}
 	index := &SiteBlacklistIndex{}
+	seenGroups := map[string]bool{}
 	for i, item := range list {
 		mapping, ok := item.(map[string]any)
 		if !ok {
 			return nil, nil, fmt.Errorf("site-blacklist[%d] must be a mapping", i)
 		}
-		if err := rejectUnknownKeys(mapping, map[string]struct{}{"proxy": {}, "rules": {}, "group": {}}, fmt.Sprintf("site-blacklist[%d]", i)); err != nil {
+		if err := rejectUnknownKeys(mapping, map[string]struct{}{"rules": {}, "group": {}}, fmt.Sprintf("site-blacklist[%d]", i)); err != nil {
 			return nil, nil, err
 		}
-		proxy, ok := mapping["proxy"].(string)
-		if !ok || strings.TrimSpace(proxy) == "" {
-			return nil, nil, fmt.Errorf("site-blacklist[%d].proxy must be a non-empty string", i)
+		group, ok := mapping["group"].(string)
+		if !ok || strings.TrimSpace(group) == "" {
+			return nil, nil, fmt.Errorf("site-blacklist[%d].group must be a non-empty string", i)
 		}
+		if seenGroups[group] {
+			return nil, nil, fmt.Errorf("duplicate site-blacklist group %q", group)
+		}
+		seenGroups[group] = true
 		lines, ok := mapping["rules"].([]any)
 		if !ok || len(lines) == 0 {
 			return nil, nil, fmt.Errorf("site-blacklist[%d].rules must be a non-empty list", i)
-		}
-		entry := SiteBlacklistEntry{Proxy: proxy}
-		if raw, exists := mapping["group"]; exists {
-			group, ok := raw.(string)
-			if !ok || strings.TrimSpace(group) == "" {
-				return nil, nil, fmt.Errorf("site-blacklist[%d].group must be a non-empty string", i)
-			}
-			entry.Group = group
 		}
 		for j, raw := range lines {
 			line, ok := raw.(string)
 			if !ok {
 				return nil, nil, fmt.Errorf("site-blacklist[%d].rules[%d] must be a string", i, j)
 			}
-			kind, payload, _, params := RC.ParseRulePayload(line, false)
+			ruleLine, names, err := ParseBlacklistRule(line)
+			if err != nil {
+				return nil, nil, fmt.Errorf("site-blacklist[%d].rules[%d]: %w", i, j, err)
+			}
+			if len(names) == 0 {
+				return nil, nil, fmt.Errorf("site-blacklist[%d].rules[%d] must specify proxies", i, j)
+			}
+			entry := SiteBlacklistEntry{Group: group, Proxies: names}
+			kind, payload, _, params := RC.ParseRulePayload(ruleLine, false)
 			if payload == "" || len(params) != 0 {
 				return nil, nil, fmt.Errorf("invalid blacklist rule %q", line)
 			}
@@ -90,8 +95,8 @@ func ParseSiteBlacklist(value any) ([]SiteBlacklistEntry, *SiteBlacklistIndex, e
 			default:
 				return nil, nil, fmt.Errorf("unsupported blacklist rule %q", line)
 			}
+			index.entries = append(index.entries, entry)
 		}
-		index.entries = append(index.entries, entry)
 	}
 	return index.entries, index, nil
 }
@@ -142,19 +147,24 @@ func (index *SiteBlacklistIndex) Match(metadata *C.Metadata) map[string]struct{}
 		if entry.Group != "" && entry.Group != index.group {
 			continue
 		}
+		matched := false
 		for _, rule := range entry.rules {
-			if matched, _ := rule.Match(metadata, C.RuleMatchHelper{}); matched {
-				matches[entry.Proxy] = struct{}{}
+			if ok, _ := rule.Match(metadata, C.RuleMatchHelper{}); ok {
+				matched = true
 				break
 			}
 		}
-		if _, matched := matches[entry.Proxy]; matched {
-			continue
+		if !matched {
+			for _, name := range entry.providers {
+				if provider := source.providers[name]; provider != nil && provider.Match(metadata, C.RuleMatchHelper{}) {
+					matched = true
+					break
+				}
+			}
 		}
-		for _, name := range entry.providers {
-			if provider := source.providers[name]; provider != nil && provider.Match(metadata, C.RuleMatchHelper{}) {
-				matches[entry.Proxy] = struct{}{}
-				break
+		if matched {
+			for _, proxy := range entry.Proxies {
+				matches[proxy] = struct{}{}
 			}
 		}
 	}
