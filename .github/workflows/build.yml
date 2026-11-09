@@ -99,8 +99,9 @@ jobs:
           cat > release-notes.md <<'NOTES'
           Linux / Windows x86-64 (AMD64, GOAMD64=v1).
 
-          普通版用于日常使用；文件名含 beta 的版本额外记录 weighted-sticky 诊断日志。
-          日志位于配置目录 diagnostics/weighted-sticky/，可能包含访问站点，请按需保存。
+          普通版用于日常使用；文件名含 beta 的版本额外向标准输出记录 weighted-sticky 诊断日志。
+          诊断行以 [weighted-sticky-diag] 开头，不受 log-level 过滤，由客户端收集和轮转。
+          内核不创建独立诊断文件；诊断可能包含访问站点，请按需保存。
           订阅配置参见 docs/extensions/weighted-sticky-subscription.yaml。
           NOTES
           gh release create "$VERSION" dist/* --repo "$REPOSITORY" --target "$COMMIT" \

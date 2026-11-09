@@ -8,10 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -31,10 +28,10 @@ type diagInstance struct {
 	totals map[string]map[string]uint64
 }
 
-// fileDiag is the process-wide beta writer. It is created during strategy
-// construction but opens no file and starts no goroutine until Start registers
-// the first running strategy. Hot reload reuses the same writer and file.
-type fileDiag struct {
+// stdoutDiag is the process-wide beta writer. It is created during strategy
+// construction but starts no goroutine until Start registers the first running
+// strategy. Hot reload reuses the writer. The host owns log files and rotation.
+type stdoutDiag struct {
 	runID string
 	key   []byte
 
@@ -42,7 +39,6 @@ type fileDiag struct {
 	active atomic.Bool
 
 	mu        sync.Mutex
-	file      *os.File
 	instances map[string]*diagInstance
 	started   bool
 
@@ -61,7 +57,7 @@ func newProcessDiag() diagEmitter {
 	processDiagMu.Lock()
 	defer processDiagMu.Unlock()
 	if processDiag == nil {
-		writer, err := newFileDiag()
+		writer, err := newStdoutDiag()
 		if err != nil {
 			log.Errorln("weighted-sticky diag: cannot create random IDs: %v", err)
 			processDiag = noopDiag{}
@@ -72,7 +68,7 @@ func newProcessDiag() diagEmitter {
 	return processDiag
 }
 
-func newFileDiag() (*fileDiag, error) {
+func newStdoutDiag() (*stdoutDiag, error) {
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		return nil, err
@@ -81,7 +77,7 @@ func newFileDiag() (*fileDiag, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &fileDiag{
+	return &stdoutDiag{
 		runID:     runID,
 		key:       key,
 		instances: map[string]*diagInstance{},
@@ -96,9 +92,9 @@ func newRunID() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-func (d *fileDiag) Enabled() bool { return d.active.Load() }
+func (d *stdoutDiag) Enabled() bool { return d.active.Load() }
 
-func (d *fileDiag) KeyID(key string) string {
+func (d *stdoutDiag) KeyID(key string) string {
 	if key == "" {
 		return ""
 	}
@@ -107,18 +103,14 @@ func (d *fileDiag) KeyID(key string) string {
 	return hex.EncodeToString(mac.Sum(nil)[:16])
 }
 
-func (d *fileDiag) Register(instance, group string, config diagConfig) {
+func (d *stdoutDiag) Register(instance, group string, config diagConfig) {
 	d.mu.Lock()
 	if _, exists := d.instances[instance]; exists {
 		d.mu.Unlock()
 		return
 	}
 	if !d.started {
-		if err := d.openLocked(); err != nil {
-			d.mu.Unlock()
-			log.Errorln("weighted-sticky diag: cannot open output: %v", err)
-			return
-		}
+		d.startLocked()
 	}
 	d.instances[instance] = &diagInstance{
 		group:  group,
@@ -134,7 +126,7 @@ func (d *fileDiag) Register(instance, group string, config diagConfig) {
 	})
 }
 
-func (d *fileDiag) Unregister(instance string) {
+func (d *stdoutDiag) Unregister(instance string) {
 	d.mu.Lock()
 	inst := d.instances[instance]
 	if inst == nil {
@@ -156,13 +148,13 @@ func (d *fileDiag) Unregister(instance string) {
 	}
 	d.mu.Unlock()
 
-	// Close waits for events already queued for this instance to reach the file.
+	// Close waits for events already queued for this instance to reach stdout.
 	event.flushed = make(chan struct{})
 	d.ch <- event
 	<-event.flushed
 }
 
-func (d *fileDiag) Emit(event diagEvent) {
+func (d *stdoutDiag) Emit(event diagEvent) {
 	if !d.active.Load() {
 		return
 	}
@@ -180,7 +172,7 @@ func (d *fileDiag) Emit(event diagEvent) {
 	}
 }
 
-func (d *fileDiag) AddCount(instance, node, metric string, n uint64) {
+func (d *stdoutDiag) AddCount(instance, node, metric string, n uint64) {
 	if n == 0 || node == "" || metric == "" || !d.active.Load() {
 		return
 	}
@@ -198,23 +190,7 @@ func (d *fileDiag) AddCount(instance, node, metric string, n uint64) {
 	counts[metric] += n
 }
 
-func (d *fileDiag) openLocked() error {
-	home := C.Path.HomeDir()
-	if home == "" {
-		return errors.New("empty home directory")
-	}
-	dir := filepath.Join(home, "diagnostics", "weighted-sticky")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	name := fmt.Sprintf("weighted-sticky-%s-%d-%s.ndjson",
-		time.Now().UTC().Format("20060102T150405Z"), os.Getpid(), d.runID)
-	file, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-
-	d.file = file
+func (d *stdoutDiag) startLocked() {
 	d.ch = make(chan diagEvent, diagQueueSize)
 	d.started = true
 
@@ -229,11 +205,9 @@ func (d *fileDiag) openLocked() error {
 	go d.run()
 	go d.runSummary()
 	d.active.Store(true)
-	log.Infoln("weighted-sticky diag: writing diagnostics/weighted-sticky/%s", name)
-	return nil
 }
 
-func (d *fileDiag) run() {
+func (d *stdoutDiag) run() {
 	for event := range d.ch {
 		if event.Name == "summary" && event.flushed != nil {
 			event.Fields["dropped"] = d.dropped.Load()
@@ -246,7 +220,7 @@ func (d *fileDiag) run() {
 	}
 }
 
-func (d *fileDiag) runSummary() {
+func (d *stdoutDiag) runSummary() {
 	ticker := time.NewTicker(diagSummaryInterval)
 	defer ticker.Stop()
 	for range ticker.C {
@@ -254,7 +228,7 @@ func (d *fileDiag) runSummary() {
 	}
 }
 
-func (d *fileDiag) emitSummaries() {
+func (d *stdoutDiag) emitSummaries() {
 	d.mu.Lock()
 	instances := make([]string, 0, len(d.instances))
 	for instance := range d.instances {
@@ -284,7 +258,7 @@ func (d *fileDiag) emitSummaries() {
 	}
 }
 
-func (d *fileDiag) writeMarshaled(event diagEvent) {
+func (d *stdoutDiag) writeMarshaled(event diagEvent) {
 	line := d.line(event)
 	encoded, err := json.Marshal(line)
 	if err != nil {
@@ -295,7 +269,7 @@ func (d *fileDiag) writeMarshaled(event diagEvent) {
 	d.writeLine(encoded)
 }
 
-func (d *fileDiag) line(event diagEvent) map[string]any {
+func (d *stdoutDiag) line(event diagEvent) map[string]any {
 	ts := event.Time
 	if ts.IsZero() {
 		ts = time.Now().UTC()
@@ -320,14 +294,14 @@ func (d *fileDiag) line(event diagEvent) map[string]any {
 	return line
 }
 
-func (d *fileDiag) writeLine(line []byte) {
+func (d *stdoutDiag) writeLine(line []byte) {
 	d.writeMu.Lock()
 	defer d.writeMu.Unlock()
-	if d.file == nil {
-		return
-	}
-	line = append(line, '\n')
-	if _, err := d.file.Write(line); err != nil {
+	// One complete line per write, independent of Mihomo's ordinary log level.
+	// Verge captures stdout and owns the destination, rotation and retention.
+	output := append([]byte("[weighted-sticky-diag] "), line...)
+	output = append(output, '\n')
+	if _, err := os.Stdout.Write(output); err != nil {
 		n := d.writeErrors.Add(1)
 		if n == 1 || n%100 == 0 {
 			log.Errorln("weighted-sticky diag: write failed: %v", err)

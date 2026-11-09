@@ -154,6 +154,11 @@ func bindingIdentity(metadata *C.Metadata) (string, error) {
 	if metadata == nil {
 		return "", errors.New("weighted-sticky: cannot build a cache key without metadata")
 	}
+	// Core-originated requests have no inbound client; keep their bindings
+	// separate from authenticated users and source addresses.
+	if metadata.Type == C.INNER {
+		return "internal\x00mihomo", nil
+	}
 	if metadata.InUser != "" {
 		return "user\x00" + metadata.InUser, nil
 	}

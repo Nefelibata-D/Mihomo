@@ -5,6 +5,7 @@
 # 选路：rules 先决定代理组；只有 strategy: weighted-sticky 使用以下扩展。
 # 权重仅决定新绑定的首次抽选。有效绑定优先复用，连接失败沿用内核的有界重试。
 # 缓存键为入口身份（认证用户名优先，否则源 IP）与网站身份的组合。
+# 内核内部请求（INNER，例如规则集下载和 DNS）使用独立内部身份，仍按规则选路和网站绑定。
 # 网站身份默认使用 PSL eTLD+1；无法求取时使用完整域名，IP 目标按 IP 区分。
 # 可在 weighted-sticky.site-groups 中指定站点组：
 #   - name: example
@@ -37,6 +38,7 @@
 #
 # resilience.control 查询 GET {base-url}/v1/nodes/{node-id}/status，
 # 使用 Authorization: Bearer {uuid}。200=normal，409=grace，403=disabled。
+# 控制查询使用 Mihomo DIRECT 的域名解析与直连拨号，不经过受管代理组或环境代理。
 # 额度状态仅观察；不阻止新连接、不清理绑定，服务器执行最终限额。
 # 查询失败保持最近明确状态；无历史则未知。健康检查不改变账户状态。
 # 按 nodes[].id 查询，同服务器代理共享结果；启动和全服务器健康异常触发，宽限周期观察。
@@ -48,8 +50,11 @@
 # weights/default-weight/control.node-ids 已移除；权重必须为正整数。
 # 普通 select 组及其他负载策略不读取这些扩展配置。
 #
-# beta 版额外写入配置目录 diagnostics/weighted-sticky/*.ndjson，记录选路、
-# 状态变化和失败事件。日志包含站点信息；普通版不生成该诊断文件。
+# beta 版向标准输出写入 [weighted-sticky-diag] 前缀 + 单行 JSON，记录选路、
+# 状态变化和失败事件。诊断由 beta_diag 构建标签独立启用，不受 log-level
+# （包括 error / silent）过滤；普通版不输出诊断。包含站点信息。
+# Clash Verge Rev 收集标准输出并负责日志目录、轮转和保留；内核不再创建
+# 独立诊断文件，不经 /logs API。独立运行需要自行收集 stdout。
 
 mixed-port: 7890
 allow-lan: false

@@ -9,6 +9,9 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/metacubex/mihomo/component/dialer"
+	"github.com/metacubex/mihomo/component/resolver"
 )
 
 var (
@@ -57,8 +60,10 @@ func NewControlClient(options ControlClientOptions) (*ControlClient, error) {
 	transport := &http.Transport{
 		// No Proxy: the status query must be a direct connection to the
 		// management address, never through an egress under management.
-		Proxy:                 nil,
-		DialContext:           (&net.Dialer{Timeout: options.Timeout, KeepAlive: 30 * time.Second}).DialContext,
+		Proxy: nil,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, address, dialer.WithResolver(resolver.DirectHostResolver))
+		},
 		ForceAttemptHTTP2:     false,
 		MaxIdleConns:          4,
 		MaxIdleConnsPerHost:   2,
