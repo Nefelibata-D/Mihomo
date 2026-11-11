@@ -136,6 +136,56 @@ func diagCandidateNames(candidates []C.Proxy) []string {
 	return names
 }
 
+// diagDraw records the exact filtered pool passed to SelectServer; it must not
+// query health again or consume the strategy's random source.
+func (s *Strategy) diagDraw(flow, key string, candidates, pool []C.Proxy, selected C.Proxy) {
+	present := make(map[string]bool, len(pool))
+	for _, proxy := range pool {
+		present[proxy.Name()] = true
+	}
+	servers := make([]Node, 0, len(s.config.Nodes))
+	total := 0
+	for _, node := range s.config.Nodes {
+		entry := Node{Name: node.Name, ID: node.ID, Weight: node.Weight}
+		for _, name := range node.Proxies {
+			if present[name] {
+				entry.Proxies = append(entry.Proxies, name)
+			}
+		}
+		if len(entry.Proxies) > 0 {
+			servers = append(servers, entry)
+			total += entry.Weight
+		}
+	}
+	siteType, site := diagSite(key)
+	s.diagEmit("selection.draw", flow, map[string]any{
+		"binding": s.diagKeyID(key), "server_id": s.nodeID(selected),
+		"selected": selected.Name(), "site_type": siteType, "site": site,
+		"candidates": diagCandidateNames(candidates), "pool": servers, "total_weight": total,
+	})
+}
+
+func (s *Strategy) diagDialFailure(flow string, proxy C.Proxy, metadata *C.Metadata, stage string, attempt int, err error) {
+	if !s.diagEnabled() {
+		return
+	}
+	fields := map[string]any{
+		"node": proxy.Name(), "stage": stage, "attempt": attempt,
+		"error_class": diagErrorClass(err), "error": err.Error(), "error_type": fmt.Sprintf("%T", err),
+		"proxy_type": proxy.Type().String(), "supports_udp": proxy.SupportUDP(),
+	}
+	if metadata != nil {
+		fields["network"] = metadata.NetWork.String()
+		fields["host"] = metadata.Host
+		if metadata.DstIP.IsValid() {
+			fields["destination_ip"] = metadata.DstIP.String()
+		}
+		fields["destination_port"] = metadata.DstPort
+	}
+	s.diagEmit("dial.failure", flow, fields)
+	s.diagAddCount(proxy.Name(), diagMetricFailure, 1)
+}
+
 func diagBlacklistHits(candidates []C.Proxy, blocked map[string]struct{}) []string {
 	hits := make([]string, 0, len(blocked))
 	if len(blocked) == 0 {
@@ -151,7 +201,7 @@ func diagBlacklistHits(candidates []C.Proxy, blocked map[string]struct{}) []stri
 }
 
 // diagSite returns the normalized website identity already embedded in the
-// binding key. A destination IP is deliberately not recorded; the anonymous
+// binding key. Draw events do not record a destination IP; the anonymous
 // binding ID still distinguishes it within a run.
 func diagSite(key string) (kind, value string) {
 	parts := strings.Split(key, "\x00")

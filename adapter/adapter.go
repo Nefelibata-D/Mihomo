@@ -309,6 +309,7 @@ func NewProxy(adapter C.ProxyAdapter) *Proxy {
 }
 
 func urlToMetadata(rawURL string) (addr C.Metadata, err error) {
+	addr.Type = C.INNER
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return

@@ -1,67 +1,16 @@
-# Pass 订阅示例（Mihomo 扩展）
-# 将 .invalid 地址、UUID、REALITY 参数、节点 ID 和健康检查 URL 替换为实际配置。
-# 校验配置：pass -t -f weighted-sticky-subscription.yaml
-#
-# 选路：rules 先决定代理组；只有 strategy: weighted-sticky 使用以下扩展。
-# 权重仅决定新绑定的首次抽选。有效绑定优先复用，连接失败沿用内核的有界重试。
-# 缓存键为入口身份（认证用户名优先，否则源 IP）与网站身份的组合。
-# 内核内部请求（INNER，例如规则集下载和 DNS）使用独立内部身份，仍按规则选路和网站绑定。
-# 网站身份默认使用 PSL eTLD+1；无法求取时使用完整域名，IP 目标按 IP 区分。
-# 可在 weighted-sticky.site-groups 中指定站点组：
-#   - name: example
-#     domains: [login.example.invalid]
-#     domain-suffixes: [example.invalid]
-# 完整匹配优先，其次为最长后缀；域名统一转为小写、IDN ASCII 并移除末尾点。
-#
-# site-blacklist 支持 DOMAIN / PROCESS（名称、路径及正则/通配符）规则。
-# 匹配当前连接元数据；绑定索引仍按域名，仅影响新绑定，不撤销已有有效绑定。
-# Process lookup follows the selected proxy chain, including listeners.proxy; find-process-mode is respected.
-# Domain matching uses normalized Host (lowercase, trailing dot removed, IDN ASCII), not SniffHost.
-# 有未被列入黑名单的获准节点时优先使用；全部被列入时仍允许尝试。
-# 条目可加 group: 默认负载 限定策略组；省略时作用于所有 weighted-sticky 组。
-# rules 支持 DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / DOMAIN-REGEX /
-# DOMAIN-WILDCARD / RULE-SET。正则完整匹配需自行添加 ^ 和 $。
-# 旧 domains / domain-suffixes 黑名单字段不再支持。
-#
-# 引用规则集示例：在条目 rules 中添加 RULE-SET,websites，并配置：
-# rule-providers:
-#   websites:
-#     type: http
-#     behavior: classical
-#     format: yaml
-#     url: https://panel.example.invalid/rulesets/sites.yaml
-#     interval: 3600
-# 也支持 type: file + path，以及 type: inline + payload。
-# yaml 文件使用 payload 列表，text 文件每行一条规则；只接受上述五类域名规则，
-# 不带目标策略或额外参数。路由可以复用同一规则集。
-# 加载与更新使用原生 provider；非法规则使整次更新失败，不发布部分解析结果。
-#
-# resilience.control 查询 GET {base-url}/v1/nodes/{node-id}/status，
-# 使用 Authorization: Bearer {uuid}。200=normal，409=grace，403=disabled。
-# 控制查询使用 Mihomo DIRECT 的域名解析与直连拨号，不经过受管代理组或环境代理。
-# 额度状态仅观察；不阻止新连接、不清理绑定，服务器执行最终限额。
-# 查询失败保持最近明确状态；无历史则未知。健康检查不改变账户状态。
-# 按 nodes[].id 查询，同服务器代理共享结果；启动和全服务器健康异常触发，宽限周期观察。
-# 健康沿用官方 URLTest、定时与失败触发；额度查询异步并发、每服务器去重和限频。
-# 正常选择先筛健康，再黑名单择优，然后服务器加权、服务器内等概率抽选。
-# 官方重试每次只拨一个代理：第一轮原服务器优先，第二轮所有实际成员各一次。
-# 旧绑定原服务器每代理首轮最多两次，其余一次；新分配首轮每代理一次，含首次。
-# 两轮机会耗尽即停止；官方十次总尝试、超时和等待机制不变，没有内层拨号循环。
-# weights/default-weight/control.node-ids 已移除；权重必须为正整数。
-# 普通 select 组及其他负载策略不读取这些扩展配置。
-#
-# beta 版向标准输出写入 [weighted-sticky-diag] 前缀 + 单行 JSON，记录选路、
-# 状态变化和失败事件。诊断由 beta_diag 构建标签独立启用，不受 log-level
-# （包括 error / silent）过滤；普通版不输出诊断。包含站点信息。
-# Clash Verge Rev 收集标准输出并负责日志目录、轮转和保留；内核不再创建
-# 独立诊断文件，不经 /logs API。独立运行需要自行收集 stdout。
+# Mihomo 扩展订阅示例
 
+# HTTP 与 SOCKS 共用的本地监听端口。
 mixed-port: 7890
+# 是否允许局域网设备访问。
 allow-lan: false
+# 按末尾 rules 选择代理或代理组。
 mode: rule
 log-level: info
+# 是否启用 IPv6。
 ipv6: false
 
+# 出口节点；示例地址、UUID 和 REALITY 参数需替换为实际值。
 proxies:
   - name: 日本出口
     type: vless
@@ -91,11 +40,12 @@ proxies:
       public-key: ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0A
       short-id: "00000000"
 
-# 新绑定的网站黑名单：每组一个条目，每条规则末尾列出排除的代理。
-# rules 使用 类型,内容,[代理A, 代理B]；含逗号、方括号或引号的名称使用 JSON 双引号。
-# group 必填且不重复；发布的代理列表不能为空；旧 proxy 字段不再接受。
+# 新绑定的候选排除规则，不撤销已有有效绑定；全部候选均命中时仍允许尝试。
 site-blacklist:
+  # 必填，对应 weighted-sticky 代理组名称；同组只写一个条目。
   - group: 默认负载
+    # 每条为 类型,内容,[代理名列表]；列表不能为空，代理名对应 proxies[].name。
+    # 支持 DOMAIN、PROCESS 系列及 RULE-SET；正则完整匹配需自行加 ^ 和 $。
     rules:
       - DOMAIN,sensitive.example.invalid,[日本出口]
       - DOMAIN-SUFFIX,media.example.invalid,[日本出口, 美国出口]
@@ -104,41 +54,69 @@ site-blacklist:
       - DOMAIN-WILDCARD,*.cdn.example.invalid,[日本出口]
 
 proxy-groups:
-  # 单节点路由。
   - name: 美国单节点
+    # 手动选择此组中的出口。
     type: select
     proxies: [美国出口]
 
   - name: 默认负载
+    # 负载均衡代理组。
     type: load-balance
+    # 本组可使用的代理名称。
     proxies: [日本出口, 美国出口]
+    # 节点健康检查地址，需替换。
     url: https://health.example.invalid/ready
+    # 健康检查期望的 HTTP 状态码。
     expected-status: 204
+    # 健康检查间隔，单位秒。
     interval: 1800
+    # 不因代理组闲置而暂停定时健康检查。
     lazy: false
+    # 新网站绑定按权重选择，已有有效绑定优先复用。
     strategy: weighted-sticky
+    # 绑定按入口身份与网站身份区分；网站默认按主域名归组，IP 目标按 IP 区分。
     weighted-sticky:
+      # 绑定空闲过期时间，单位秒，必须为正数。
       idle-timeout: 300
+      # 按实际服务器组织代理；本组每个代理必须归属一个服务器。
       nodes:
+        # 服务器显示名称。
         - name: 日本服务器
+          # 控制端的服务器节点 ID，需替换为实际值。
           id: jp-guid
+          # 正整数；按服务器计权，此例日本:美国为 7:3。
           weight: 7
+          # 同服务器可放多个代理，服务器内等概率选择。
           proxies: [日本出口]
         - name: 美国服务器
           id: us-guid
           weight: 3
           proxies: [美国出口]
+      # 最多缓存的网站绑定数，必须为正整数。
       max-bindings: 10000
+      # 可选 site-groups：将多个域名合并为同一网站绑定。
+      # domains 完整匹配优先，其次匹配 domain-suffixes 的最长后缀。
+      # site-groups:
+      #   - name: example
+      #     domains: [login.example.invalid]
+      #     domain-suffixes: [example.invalid]
+      # 账户额度状态观察配置；最终限额由服务器执行。
       resilience:
+        # 启用状态查询；设为 false 时不应再配置 control。
         enabled: true
         control:
+          # 控制 API 根地址，按 nodes[].id 查询状态。
           base-url: https://control.example.invalid
+          # 控制 API 的 Bearer 凭据，需替换。
           uuid: 00000000-0000-4000-8000-000000000001
+          # 单次控制查询超时，单位秒。
           timeout: 3
+          # 同服务器状态查询的最小间隔，单位秒。
           min-interval: 30
+          # 宽限状态下的查询间隔，单位秒。
           grace-interval: 300
 
+# 按顺序匹配，最后的 MATCH 处理其余请求。
 rules:
-  # 需要固定出口的网站。
   - DOMAIN-SUFFIX,us-only.example.invalid,美国单节点
   - MATCH,默认负载

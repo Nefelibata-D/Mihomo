@@ -324,8 +324,7 @@ func (s *Strategy) chooseFresh(candidates, pool []C.Proxy, key string, flow stri
 		return "", err
 	}
 	if s.diagEnabled() {
-		siteType, site := diagSite(key)
-		s.diagEmit("selection.draw", flow, map[string]any{"binding": s.diagKeyID(key), "server_id": s.nodeID(selected), "selected": selected.Name(), "site_type": siteType, "site": site})
+		s.diagDraw(flow, key, candidates, pool, selected)
 		s.diagAddCount(selected.Name(), diagMetricDraw, 1)
 	}
 	return selected.Name(), nil

@@ -57,30 +57,14 @@ func (p *resilientProxy) DialContext(ctx context.Context, metadata *C.Metadata) 
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, stopRetry(ctxErr)
 		}
-		if p.strategy.diagEnabled() {
-			p.strategy.diagEmit("dial.failure", session.flow, map[string]any{
-				"node":        proxy.Name(),
-				"stage":       "dial",
-				"error_class": diagErrorClass(err),
-				"attempt":     attempt,
-			})
-			p.strategy.diagAddCount(proxy.Name(), diagMetricFailure, 1)
-		}
+		p.strategy.diagDialFailure(session.flow, proxy, metadata, "dial", attempt, err)
 		session.noteFailure(proxy)
 		// A dial failure is safe to retry by the official loop. It is also the
 		// official health-check trigger at the group boundary.
 		return nil, err
 	}
 	if conn == nil {
-		if p.strategy.diagEnabled() {
-			p.strategy.diagEmit("dial.failure", session.flow, map[string]any{
-				"node":        proxy.Name(),
-				"stage":       "dial",
-				"error_class": "nil_connection",
-				"attempt":     attempt,
-			})
-			p.strategy.diagAddCount(proxy.Name(), diagMetricFailure, 1)
-		}
+		p.strategy.diagDialFailure(session.flow, proxy, metadata, "dial", attempt, errors.New("weighted-sticky: candidate returned a nil connection"))
 		session.noteFailure(proxy)
 		return nil, errors.New("weighted-sticky: candidate returned a nil connection")
 	}
@@ -155,28 +139,12 @@ func (p *resilientProxy) ListenPacketContext(ctx context.Context, metadata *C.Me
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, stopRetry(ctxErr)
 		}
-		if p.strategy.diagEnabled() {
-			p.strategy.diagEmit("dial.failure", session.flow, map[string]any{
-				"node":        proxy.Name(),
-				"stage":       "packet",
-				"error_class": diagErrorClass(err),
-				"attempt":     attempt,
-			})
-			p.strategy.diagAddCount(proxy.Name(), diagMetricFailure, 1)
-		}
+		p.strategy.diagDialFailure(session.flow, proxy, metadata, "packet", attempt, err)
 		session.noteFailure(proxy)
 		return nil, err
 	}
 	if conn == nil {
-		if p.strategy.diagEnabled() {
-			p.strategy.diagEmit("dial.failure", session.flow, map[string]any{
-				"node":        proxy.Name(),
-				"stage":       "packet",
-				"error_class": "nil_packet_connection",
-				"attempt":     attempt,
-			})
-			p.strategy.diagAddCount(proxy.Name(), diagMetricFailure, 1)
-		}
+		p.strategy.diagDialFailure(session.flow, proxy, metadata, "packet", attempt, errors.New("weighted-sticky: candidate returned a nil packet connection"))
 		session.noteFailure(proxy)
 		return nil, errors.New("weighted-sticky: candidate returned a nil packet connection")
 	}
