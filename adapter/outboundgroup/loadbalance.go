@@ -31,12 +31,14 @@ type LoadBalanceOption struct {
 	weightedStickyPresent bool           `group:"-"`
 	// SiteBlacklist is parsed once from the subscription top level and shared
 	// by every group that explicitly selects weighted-sticky.
+	StickyRules   weightedsticky.StickyRules         `group:"-"`
 	SiteBlacklist *weightedsticky.SiteBlacklistIndex `group:"-"`
 }
 
 type LoadBalance struct {
 	*GroupBase
 	disableUDP     bool
+	stickyRules    weightedsticky.StickyRules
 	siteBlacklist  *weightedsticky.SiteBlacklistIndex
 	strategyFn     strategyFn
 	strategyStart  func()
@@ -362,6 +364,7 @@ func NewLoadBalance(option GroupCommonOption, loadBalanceOption LoadBalanceOptio
 		if err != nil {
 			return nil, err
 		}
+		config.StickyRules = loadBalanceOption.StickyRules
 		config.Blacklist = loadBalanceOption.SiteBlacklist
 		strategy, makeErr := newWeightedStickyStrategy(option.Name, config, option.URL, providers, func() []C.Proxy { return lb.GetProxies(false) })
 		err = makeErr
@@ -373,6 +376,7 @@ func NewLoadBalance(option GroupCommonOption, loadBalanceOption LoadBalanceOptio
 		return nil, fmt.Errorf("%w: %s", errStrategy, loadBalanceOption.Strategy)
 	}
 	lb = &LoadBalance{
+		stickyRules:   loadBalanceOption.StickyRules,
 		siteBlacklist: loadBalanceOption.SiteBlacklist,
 		GroupBase: NewGroupBase(GroupBaseOption{
 			Name:           option.Name,
@@ -405,4 +409,6 @@ func (lb *LoadBalance) HealthCheckCompleted(url string) {
 }
 
 // NeedsProcessMetadata lets tunnel use its normal process lookup before selection.
-func (lb *LoadBalance) NeedsProcessMetadata() bool { return lb.siteBlacklist.NeedsProcess() }
+func (lb *LoadBalance) NeedsProcessMetadata() bool {
+	return lb.siteBlacklist.NeedsProcess() || lb.stickyRules.NeedsProcess()
+}

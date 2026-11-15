@@ -45,6 +45,7 @@ type Options struct {
 	MaxBindings int
 	SiteGroups  []SiteGroup
 	Sites       *SiteGroupIndex
+	StickyRules StickyRules
 	Blacklist   *SiteBlacklistIndex
 	Resilience  *ResilienceOptions
 }

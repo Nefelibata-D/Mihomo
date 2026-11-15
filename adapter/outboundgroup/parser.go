@@ -47,6 +47,10 @@ type GroupCommonOption struct {
 }
 
 func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, providersMap map[string]P.ProxyProvider, AllProxies []string, AllProviders []string, siteBlacklist *weightedsticky.SiteBlacklistIndex) (ProxyGroup, error) {
+	return ParseProxyGroupWithStickyRules(config, proxyMap, providersMap, AllProxies, AllProviders, siteBlacklist, nil)
+}
+
+func ParseProxyGroupWithStickyRules(config map[string]any, proxyMap map[string]C.Proxy, providersMap map[string]P.ProxyProvider, AllProxies []string, AllProviders []string, siteBlacklist *weightedsticky.SiteBlacklistIndex, stickyRules weightedsticky.StickyRules) (ProxyGroup, error) {
 	decoder := structure.NewDecoder(structure.Option{TagName: "group", WeaklyTypedInput: true})
 
 	groupOption := GroupCommonOption{
@@ -225,6 +229,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 				opt.WeightedSticky = map[string]any{}
 			}
 		}
+		opt.StickyRules = stickyRules
 		opt.SiteBlacklist = siteBlacklist.ForGroup(groupName)
 		return NewLoadBalance(groupOption, opt, emptyFallback, providers)
 	case "relay":

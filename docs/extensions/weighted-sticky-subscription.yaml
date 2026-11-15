@@ -53,6 +53,13 @@ site-blacklist:
       - 'DOMAIN-REGEX,^video[0-9]+\.example\.invalid$,[日本出口]'
       - DOMAIN-WILDCARD,*.cdn.example.invalid,[日本出口]
 
+# 按顺序采用首条匹配规则。最后两个字段是有效秒数、是否按活动续期。
+# 未匹配的连接使用本组全局配置。false 从创建绑定开始计时。
+site-sticky:
+  - group: 默认负载
+    rules:
+      - DOMAIN,challenges.cloudflare.com,20,false
+
 proxy-groups:
   - name: 美国单节点
     # 手动选择此组中的出口。

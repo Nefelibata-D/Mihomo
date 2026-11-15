@@ -10,12 +10,18 @@ import (
 // binding is never evicted to make room; the caller must surface this error.
 var ErrBindingCapacity = errors.New("weighted-sticky: binding cache capacity exceeded")
 
+type bindingPolicy struct {
+	timeout time.Duration
+	fixed   bool
+}
+
 // Binding is one website binding. The generation makes an old connection
 // unable to renew or delete a binding created after it expired.
 type Binding struct {
 	key          string
 	proxyName    string
 	generation   uint64
+	policy       bindingPolicy
 	lastActivity time.Time
 	refs         int
 	committed    bool
@@ -85,7 +91,7 @@ func NewCache(maxBindings int, idleTimeout time.Duration, now func() time.Time) 
 }
 
 func (c *Cache) expired(b *Binding, now time.Time) bool {
-	return now.Sub(b.lastActivity) >= c.idleTimeout
+	return now.Sub(b.lastActivity) >= b.policy.timeout
 }
 
 // keepLocked reports whether a record with no active reference must stay in the
@@ -100,6 +106,13 @@ func (c *Cache) keepLocked(b *Binding, now time.Time) bool {
 // shares exactly one reservation. choose runs under the cache lock and must
 // not perform I/O; it selects a candidate name for a new binding.
 func (c *Cache) Acquire(key string, choose func() (string, error), usable func(string) bool) (*Handle, error) {
+	return c.acquire(key, bindingPolicy{timeout: c.idleTimeout}, choose, usable)
+}
+
+func (c *Cache) acquire(key string, policy bindingPolicy, choose func() (string, error), usable func(string) bool) (*Handle, error) {
+	if policy.timeout == 0 {
+		policy.timeout = c.idleTimeout
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -136,6 +149,7 @@ func (c *Cache) Acquire(key string, choose func() (string, error), usable func(s
 		key:          key,
 		proxyName:    name,
 		generation:   c.nextGeneration,
+		policy:       policy,
 		lastActivity: now,
 		refs:         1,
 	}
@@ -168,6 +182,7 @@ func (c *Cache) Rebind(key string, expectedGeneration uint64, proxyName string) 
 	b := &Binding{
 		key:          key,
 		proxyName:    proxyName,
+		policy:       current.policy,
 		generation:   c.nextGeneration,
 		lastActivity: now,
 		refs:         1,
@@ -217,7 +232,9 @@ func (c *Cache) Renew(b *Binding) {
 		return
 	}
 	b.committed = true
-	b.lastActivity = now
+	if !b.policy.fixed {
+		b.lastActivity = now
+	}
 }
 
 func (c *Cache) Release(b *Binding) {

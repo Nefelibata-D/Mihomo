@@ -237,6 +237,10 @@ func (s *Strategy) SelectProxy(proxies []C.Proxy, metadata *C.Metadata, touch bo
 		return s.unavailable(err)
 	}
 
+	policy := s.config.StickyRules.stickyPolicy(metadata)
+	if policy.timeout != 0 {
+		key += fmt.Sprintf("\x00override\x00%s\x00%d/%t", host, policy.timeout, policy.fixed)
+	}
 	if !touch {
 		return s.preview(candidates, key, metadata)
 	}
@@ -264,6 +268,7 @@ func (s *Strategy) SelectProxy(proxies []C.Proxy, metadata *C.Metadata, touch bo
 		strategy:   s,
 		key:        key,
 		host:       host,
+		policy:     policy,
 		candidates: candidates,
 	}
 }

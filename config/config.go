@@ -454,6 +454,7 @@ type RawConfig struct {
 	RuleProvider  map[string]map[string]any `yaml:"rule-providers" json:"rule-providers"`
 	Proxy         []map[string]any          `yaml:"proxies" json:"proxies"`
 	ProxyGroup    []map[string]any          `yaml:"proxy-groups" json:"proxy-groups"`
+	SiteSticky    any                       `yaml:"site-sticky" json:"site-sticky"`
 	SiteBlacklist any                       `yaml:"site-blacklist" json:"site-blacklist"`
 	Rule          []string                  `yaml:"rules" json:"rule"`
 	SubRules      map[string][]string       `yaml:"sub-rules" json:"sub-rules"`
@@ -683,7 +684,20 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 	}
 	log.Infoln("Geodata Loader mode: %s", geodata.LoaderName())
 	log.Infoln("Geosite Matcher implementation: %s", geodata.SiteMatcherName())
-	ruleProviders, err := parseRuleProviders(rawCfg, siteBlacklist.ProviderNames())
+	stickyGroups, err := weightedsticky.ParseSiteSticky(rawCfg.SiteSticky)
+	if err != nil {
+		return nil, err
+	}
+	providerNames := siteBlacklist.ProviderNames()
+	for name, rules := range stickyGroups {
+		if !slices.ContainsFunc(rawCfg.ProxyGroup, func(g map[string]any) bool {
+			return g["name"] == name && g["type"] == "load-balance" && g["strategy"] == "weighted-sticky"
+		}) {
+			return nil, fmt.Errorf("site-sticky references unknown weighted-sticky group %q", name)
+		}
+		rules.ProviderNames(providerNames)
+	}
+	ruleProviders, err := parseRuleProviders(rawCfg, providerNames)
 	if err != nil {
 		return nil, err
 	}
@@ -692,7 +706,12 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 	if err := siteBlacklist.BindProviders(ruleProviders); err != nil {
 		return nil, err
 	}
-	proxies, providers, err := parseProxies(rawCfg, blacklistEntries, siteBlacklist)
+	for _, rules := range stickyGroups {
+		if err := rules.BindProviders(ruleProviders); err != nil {
+			return nil, err
+		}
+	}
+	proxies, providers, err := parseProxies(rawCfg, blacklistEntries, siteBlacklist, stickyGroups)
 	if err != nil {
 		return nil, err
 	}
@@ -886,7 +905,7 @@ func parseTLS(cfg *RawConfig) (*TLS, error) {
 	}, nil
 }
 
-func parseProxies(cfg *RawConfig, blacklistEntries []weightedsticky.SiteBlacklistEntry, siteBlacklist *weightedsticky.SiteBlacklistIndex) (proxies map[string]C.Proxy, providersMap map[string]P.ProxyProvider, err error) {
+func parseProxies(cfg *RawConfig, blacklistEntries []weightedsticky.SiteBlacklistEntry, siteBlacklist *weightedsticky.SiteBlacklistIndex, stickyGroups map[string]weightedsticky.StickyRules) (proxies map[string]C.Proxy, providersMap map[string]P.ProxyProvider, err error) {
 	proxies = make(map[string]C.Proxy)
 	// Group construction is side-effect free: weighted-sticky strategies start
 	// their status tasks only at the activation point
@@ -999,7 +1018,8 @@ func parseProxies(cfg *RawConfig, blacklistEntries []weightedsticky.SiteBlacklis
 
 	// parse proxy group
 	for idx, mapping := range groupsConfig {
-		group, err := outboundgroup.ParseProxyGroup(mapping, proxies, providersMap, AllProxies, AllProviders, siteBlacklist)
+		name, _ := mapping["name"].(string)
+		group, err := outboundgroup.ParseProxyGroupWithStickyRules(mapping, proxies, providersMap, AllProxies, AllProviders, siteBlacklist, stickyGroups[name])
 		if err != nil {
 			return nil, nil, fmt.Errorf("proxy group[%d]: %w", idx, err)
 		}

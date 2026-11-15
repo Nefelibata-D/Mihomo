@@ -54,6 +54,7 @@ func (p failurePhase) String() string {
 type dialSession struct {
 	strategy *Strategy
 	key      string
+	policy   bindingPolicy
 	host     string
 	metadata *C.Metadata
 
@@ -83,7 +84,7 @@ type dialSession struct {
 	released   bool
 }
 
-func newDialSession(strategy *Strategy, key, host string, metadata *C.Metadata) *dialSession {
+func newDialSession(strategy *Strategy, key, host string, policy bindingPolicy, metadata *C.Metadata) *dialSession {
 	flow := ""
 	if strategy.diagEnabled() {
 		flow = newDiagFlowID()
@@ -92,6 +93,7 @@ func newDialSession(strategy *Strategy, key, host string, metadata *C.Metadata) 
 		strategy: strategy,
 		key:      key,
 		host:     host,
+		policy:   policy,
 		flow:     flow,
 		blocked:  strategy.blacklistedSet(metadata),
 		metadata: metadata.Clone(),
@@ -113,7 +115,7 @@ func (s *dialSession) ensureInit(candidates []C.Proxy) error {
 	}
 
 	pool := s.strategy.newScopedCandidates(candidates, s.metadata)
-	handle, err := s.strategy.cache.Acquire(s.key,
+	handle, err := s.strategy.cache.acquire(s.key, s.policy,
 		func() (string, error) {
 			return s.strategy.chooseFresh(candidates, pool, s.key, s.flow)
 		},
@@ -334,10 +336,10 @@ func (s *dialSession) release() {
 // state lives in the typed retry context; a direct dial (for example the
 // rematch metadata probe) gets a one-attempt session and cannot silently
 // inherit another connection's position.
-func (s *Strategy) sessionFor(ctx context.Context, key, host string, candidates []C.Proxy, metadata *C.Metadata) (*dialSession, func(), error) {
+func (s *Strategy) sessionFor(ctx context.Context, key, host string, policy bindingPolicy, candidates []C.Proxy, metadata *C.Metadata) (*dialSession, func(), error) {
 	state, inRetry := retrystate.From(ctx)
 	if !inRetry {
-		session := newDialSession(s, key, host, metadata)
+		session := newDialSession(s, key, host, policy, metadata)
 		if err := session.ensureInit(candidates); err != nil {
 			session.release()
 			return nil, nil, err
@@ -346,7 +348,7 @@ func (s *Strategy) sessionFor(ctx context.Context, key, host string, candidates 
 	}
 
 	value := state.Value(func() any {
-		return newDialSession(s, key, host, metadata)
+		return newDialSession(s, key, host, policy, metadata)
 	})
 	session, ok := value.(*dialSession)
 	if !ok {
